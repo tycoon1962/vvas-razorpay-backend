@@ -1,4 +1,13 @@
 // server.js
+
+const fs = require('fs');
+const path = require('path');
+
+const ADMIN_OFFERS_SECRET = process.env.ADMIN_OFFERS_SECRET || 'change-me-in-env';
+
+// Where offers will be stored
+const OFFERS_FILE = path.join(__dirname, 'offers.json');
+
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
