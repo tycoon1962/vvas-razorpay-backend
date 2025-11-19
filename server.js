@@ -1,12 +1,12 @@
 // server.js
 
-const fs = require('fs');
-const path = require('path');
+const fs = require("fs");
+const path = require("path");
 
-const ADMIN_OFFERS_SECRET = process.env.ADMIN_OFFERS_SECRET || 'change-me-in-env';
+const ADMIN_OFFERS_SECRET = process.env.ADMIN_OFFERS_SECRET || "change-me-in-env";
 
-// Where offers will be stored
-const OFFERS_FILE = path.join(__dirname, 'offers.json');
+// Where offers will be stored (used by admin panel & public offer validation)
+const OFFERS_FILE = path.join(__dirname, "offers.json");
 
 require("dotenv").config();
 const express = require("express");
@@ -22,17 +22,144 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cors());
 
-// Razorpay instance (we'll use this in the order route shortly)
+// Razorpay instance
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
-// Simple health check route
+const N8N_ONETIME_WEBHOOK_URL = process.env.N8N_ONETIME_WEBHOOK_URL;
+
+// ---------------------------------------------------------------------
+//  OFFERS STORAGE (READ-ONLY HERE; ADMIN PANEL WRITES THIS FILE)
+// ---------------------------------------------------------------------
+
+function loadOffers() {
+  try {
+    if (!fs.existsSync(OFFERS_FILE)) return [];
+    const raw = fs.readFileSync(OFFERS_FILE, "utf8");
+    if (!raw.trim()) return [];
+    return JSON.parse(raw);
+  } catch (err) {
+    console.error("Error reading offers.json", err);
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------
+//  ONE-TIME PLAN PRICING + OFFER LOGIC
+// ---------------------------------------------------------------------
+
+// Base prices (INR, before GST). Adjust as needed.
+const ONE_TIME_PLAN_PRICES = {
+  ONE_TIME_30: 15000, // 30-video engine
+  ONE_TIME_60: 30000, // 60-video engine
+  ONE_TIME_CUSTOM: 0, // can override per deal
+};
+
+// Compute base + GST + total for a one-time plan
+function computeOneTimePrice(planId, customBasePrice) {
+  let base = ONE_TIME_PLAN_PRICES[planId] ?? 0;
+
+  // Allow override from frontend for custom deals
+  if (typeof customBasePrice === "number" && customBasePrice > 0) {
+    base = customBasePrice;
+  }
+
+  const gst = Math.round(base * 0.18); // 18% GST
+  const total = base + gst;
+
+  return { base, gst, total };
+}
+
+// Validate if a given couponCode is applicable to a planId
+function validateOfferForPlan(planId, couponCode) {
+  if (!couponCode) return { valid: false };
+
+  const offers = loadOffers();
+  if (!offers.length) return { valid: false };
+
+  const now = new Date();
+  const code = String(couponCode).trim().toUpperCase();
+
+  const offer = offers.find((o) => o.code === code);
+  if (!offer) return { valid: false };
+
+  if (!offer.enabled) return { valid: false };
+
+  // Time window check
+  if (offer.startAt) {
+    const start = new Date(offer.startAt);
+    if (now < start) {
+      return { valid: false };
+    }
+  }
+  if (offer.endAt) {
+    const end = new Date(offer.endAt);
+    if (now > end) {
+      return { valid: false };
+    }
+  }
+
+  // Plan match check
+  if (Array.isArray(offer.applicablePlans) && offer.applicablePlans.length > 0) {
+    if (!offer.applicablePlans.includes(planId)) {
+      return { valid: false };
+    }
+  }
+
+  return {
+    valid: true,
+    offer,
+  };
+}
+
+// Apply offer to a total amount, and return discount + final
+function applyOffer(totalAmount, offer) {
+  if (!offer) {
+    return {
+      discount: 0,
+      final: totalAmount,
+      description: null,
+    };
+  }
+
+  let discount = 0;
+  if (offer.type === "PERCENT") {
+    discount = Math.round((totalAmount * Number(offer.amount || 0)) / 100);
+  } else if (offer.type === "FIXED") {
+    discount = Math.round(Number(offer.amount || 0));
+  }
+
+  if (discount < 0) discount = 0;
+  if (discount > totalAmount) discount = totalAmount;
+
+  const final = totalAmount - discount;
+
+  const description =
+    offer.type === "PERCENT"
+      ? `${offer.amount}% off via ${offer.code}`
+      : `₹${offer.amount} off via ${offer.code}`;
+
+  return {
+    discount,
+    final,
+    description,
+  };
+}
+
+// ---------------------------------------------------------------------
+//  SIMPLE HEALTH CHECK
+// ---------------------------------------------------------------------
+
 app.get("/", (req, res) => {
   res.json({ status: "ok", message: "TGP Razorpay backend is running" });
 });
-// Create Razorpay Order
+
+// ---------------------------------------------------------------------
+//  GENERIC CREATE RAZORPAY ORDER (ALREADY USED BY YOUR FRONTEND)
+// ---------------------------------------------------------------------
+
 app.post("/create-razorpay-order", async (req, res) => {
   try {
     const { amount, currency, receipt, notes } = req.body;
@@ -51,10 +178,10 @@ app.post("/create-razorpay-order", async (req, res) => {
     }
 
     const options = {
-      amount: amountInt,           // amount in paise
+      amount: amountInt, // amount in paise
       currency: currency || "INR",
       receipt: receipt,
-      notes: notes || {},         // e.g. plan_code, email, phone, gst_status, etc.
+      notes: notes || {}, // e.g. plan_code, email, phone, gst_status, etc.
     };
 
     console.log("Creating Razorpay order with options:", options);
@@ -80,9 +207,158 @@ app.post("/create-razorpay-order", async (req, res) => {
   }
 });
 
-// ---------- Verify Razorpay Payment & Notify n8n ----------
+// ---------------------------------------------------------------------
+//  PUBLIC: VALIDATE OFFER FOR ONE-TIME PLAN (for checkout UI)
+// ---------------------------------------------------------------------
+
+app.post("/api/validate-offer", (req, res) => {
+  try {
+    const { planId, basePrice, couponCode } = req.body;
+
+    if (!planId) {
+      return res.status(400).json({ error: "planId is required" });
+    }
+
+    const customBasePrice = basePrice ? Number(basePrice) : undefined;
+    const { base, gst, total } = computeOneTimePrice(planId, customBasePrice);
+
+    const result = validateOfferForPlan(planId, couponCode);
+    if (!result.valid) {
+      return res.json({
+        success: true,
+        planId,
+        base,
+        gst,
+        total,
+        offerApplied: false,
+        final: total,
+      });
+    }
+
+    const { discount, final, description } = applyOffer(total, result.offer);
+
+    res.json({
+      success: true,
+      planId,
+      base,
+      gst,
+      total,
+      offerApplied: true,
+      offerCode: result.offer.code,
+      offerType: result.offer.type,
+      offerAmount: result.offer.amount,
+      discount,
+      final,
+      offerDescription: description,
+    });
+  } catch (err) {
+    console.error("Error in /api/validate-offer", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ---------------------------------------------------------------------
+//  CREATE RAZORPAY ORDER FOR ONE-TIME PAYMENT (with offers)
+// ---------------------------------------------------------------------
+
+app.post("/create-onetime-order", async (req, res) => {
+  try {
+    const {
+      planId,
+      customBasePrice, // optional override
+      couponCode,
+      fullName,
+      companyName,
+      email,
+      phone,
+      whatsapp,
+      gstNumber,
+      registeredWithGst,
+    } = req.body;
+
+    if (!planId || !fullName || !email) {
+      return res
+        .status(400)
+        .json({ error: "planId, fullName and email are required" });
+    }
+
+    const basePriceNum =
+      typeof customBasePrice === "number" ? customBasePrice : undefined;
+    const { base, gst, total } = computeOneTimePrice(planId, basePriceNum);
+
+    // Validate / apply offer
+    const result = validateOfferForPlan(planId, couponCode);
+    let offerMeta = null;
+    let finalAmount = total;
+    let discount = 0;
+    let offerDescription = null;
+
+    if (result.valid) {
+      const calc = applyOffer(total, result.offer);
+      finalAmount = calc.final;
+      discount = calc.discount;
+      offerDescription = calc.description;
+      offerMeta = {
+        code: result.offer.code,
+        type: result.offer.type,
+        amount: result.offer.amount,
+      };
+    }
+
+    const amountInPaise = finalAmount * 100;
+
+    const order = await razorpay.orders.create({
+      amount: amountInPaise,
+      currency: "INR",
+      receipt: `VVAS_ONETIME_${Date.now()}`,
+      notes: {
+        planId,
+        fullName,
+        companyName: companyName || "",
+        email,
+        phone: phone || "",
+        whatsapp: whatsapp || "",
+        gstNumber: gstNumber || "",
+        registeredWithGst: registeredWithGst ? "yes" : "no",
+        basePrice: String(base),
+        gstAmount: String(gst),
+        grossTotal: String(total),
+        discount: String(discount),
+        finalAmount: String(finalAmount),
+        couponCode: couponCode || "",
+        offerDescription: offerDescription || "",
+      },
+    });
+
+    return res.json({
+      success: true,
+      razorpayKey: process.env.RAZORPAY_KEY_ID,
+      orderId: order.id,
+      amount: finalAmount,
+      amountInPaise,
+      currency: order.currency,
+      pricing: {
+        base,
+        gst,
+        total,
+        discount,
+        final: finalAmount,
+      },
+      offerApplied: !!offerMeta,
+      offer: offerMeta,
+    });
+  } catch (err) {
+    console.error("Error in /create-onetime-order", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ---------------------------------------------------------------------
+//  VERIFY RAZORPAY PAYMENT (EXISTING) → n8n for subscriptions / generic
+// ---------------------------------------------------------------------
+
 app.post("/verify-payment", async (req, res) => {
-  console.log(">>> /verify-payment HIT", req.body);   // 👈 ADD THIS LINE
+  console.log(">>> /verify-payment HIT", req.body);
   try {
     const {
       razorpay_payment_id,
@@ -147,25 +423,24 @@ app.post("/verify-payment", async (req, res) => {
       verified_at: new Date().toISOString(),
     };
 
-// 4) Send to n8n webhook (for Google Sheets / email / WhatsApp)
-if (process.env.N8N_PAYMENT_WEBHOOK_URL) {
-  try {
-    console.log("👀 Calling n8n webhook:", process.env.N8N_PAYMENT_WEBHOOK_URL);
-    console.log("📦 Payload for n8n:", JSON.stringify(payloadForN8N, null, 2));
+    // 4) Send to n8n webhook (for Google Sheets / email / WhatsApp)
+    if (process.env.N8N_PAYMENT_WEBHOOK_URL) {
+      try {
+        console.log("👀 Calling n8n webhook:", process.env.N8N_PAYMENT_WEBHOOK_URL);
+        console.log("📦 Payload for n8n:", JSON.stringify(payloadForN8N, null, 2));
 
-    const response = await fetch(process.env.N8N_PAYMENT_WEBHOOK_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payloadForN8N),
-    });
+        const response = await fetch(process.env.N8N_PAYMENT_WEBHOOK_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payloadForN8N),
+        });
 
-    const text = await response.text();
-    console.log("🔵 n8n webhook responded with:", text);
-  } catch (webhookErr) {
-    console.error("❌ Error calling N8N_PAYMENT_WEBHOOK_URL:", webhookErr);
-  }
-}
-
+        const text = await response.text();
+        console.log("🔵 n8n webhook responded with:", text);
+      } catch (webhookErr) {
+        console.error("❌ Error calling N8N_PAYMENT_WEBHOOK_URL:", webhookErr);
+      }
+    }
 
     return res.json({
       success: true,
@@ -181,8 +456,113 @@ if (process.env.N8N_PAYMENT_WEBHOOK_URL) {
   }
 });
 
+// ---------------------------------------------------------------------
+//  VERIFY ONE-TIME PAYMENT → n8n (SEPARATE WORKFLOW)
+// ---------------------------------------------------------------------
 
-// (We'll add /create-razorpay-order here in the next step)
+app.post("/verify-onetime-payment", async (req, res) => {
+  console.log(">>> /verify-onetime-payment HIT", req.body);
+
+  try {
+    const {
+      razorpay_payment_id,
+      razorpay_order_id,
+      razorpay_signature,
+      planId,
+      amount,
+      currency,
+      customer, // { fullName, email, phone, whatsapp, companyName, gstNumber, registeredWithGst }
+      meta,
+    } = req.body || {};
+
+    if (!razorpay_payment_id || !razorpay_order_id || !razorpay_signature) {
+      return res.status(400).json({
+        error: "Missing Razorpay payment verification fields",
+      });
+    }
+
+    // 1) Verify signature
+    const body = razorpay_order_id + "|" + razorpay_payment_id;
+
+    const expectedSignature = crypto
+      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+      .update(body.toString())
+      .digest("hex");
+
+    const isValid = expectedSignature === razorpay_signature;
+
+    if (!isValid) {
+      console.error("Invalid Razorpay signature (one-time):", {
+        razorpay_order_id,
+        razorpay_payment_id,
+      });
+      return res.status(400).json({
+        success: false,
+        error: "Invalid signature",
+      });
+    }
+
+    // 2) Optional: fetch payment details from Razorpay
+    let paymentDetails = null;
+    try {
+      paymentDetails = await razorpay.payments.fetch(razorpay_payment_id);
+    } catch (fetchErr) {
+      console.error(
+        "Error fetching payment from Razorpay (one-time):",
+        fetchErr.message
+      );
+    }
+
+    const payloadForN8N = {
+      source: "TGP-AI-VIDEO-RAZORPAY-ONETIME",
+      verified: true,
+      razorpay_payment_id,
+      razorpay_order_id,
+      razorpay_signature,
+      planId,
+      amount,
+      currency,
+      customer: customer || {},
+      meta: meta || {},
+      payment_details: paymentDetails || {},
+      verified_at: new Date().toISOString(),
+    };
+
+    if (N8N_ONETIME_WEBHOOK_URL) {
+      try {
+        console.log("👀 Calling one-time n8n webhook:", N8N_ONETIME_WEBHOOK_URL);
+        console.log("📦 One-time payload for n8n:", JSON.stringify(payloadForN8N, null, 2));
+
+        const response = await fetch(N8N_ONETIME_WEBHOOK_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payloadForN8N),
+        });
+
+        const text = await response.text();
+        console.log("🔵 One-time n8n webhook responded with:", text);
+      } catch (webhookErr) {
+        console.error("❌ Error calling N8N_ONETIME_WEBHOOK_URL:", webhookErr);
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: "One-time payment verified successfully",
+    });
+  } catch (err) {
+    console.error("Error in /verify-onetime-payment:", err);
+    return res.status(500).json({
+      success: false,
+      error: "Internal server error",
+      details: err.message,
+    });
+  }
+});
+
+// ---------------------------------------------------------------------
+//  START SERVER
+// ---------------------------------------------------------------------
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
