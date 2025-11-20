@@ -72,6 +72,213 @@ function computeOneTimePrice(planId, customBasePrice) {
   return { base, gst, total };
 }
 
+// ---------------------------------------------------------------------
+//  OFFERS ADMIN – READ / WRITE offers.json
+// ---------------------------------------------------------------------
+
+function saveOffers(offersArray) {
+  try {
+    fs.writeFileSync(OFFERS_FILE, JSON.stringify(offersArray, null, 2), "utf8");
+    console.log("offers.json updated. Total offers:", offersArray.length);
+  } catch (err) {
+    console.error("Error writing offers.json", err);
+    throw err;
+  }
+}
+
+/**
+ * Shape of an offer in offers.json:
+ * {
+ *   code: "DIWALI20",
+ *   type: "PERCENT" | "FIXED",
+ *   amount: 20,                    // percent or INR
+ *   enabled: true,
+ *   startAt: "2025-11-20T00:00:00.000Z" | null,
+ *   endAt: "2025-12-01T00:00:00.000Z" | null,
+ *   applicablePlans: ["PLAN_60", "PLAN_90"],
+ *   notes: "Intro offer for one-time plans"
+ * }
+ */
+
+// GET /api/admin/offers  → list all offers
+app.get("/api/admin/offers", (req, res) => {
+  try {
+    const offers = loadOffers();
+    return res.json(offers);
+  } catch (err) {
+    console.error("Error in GET /api/admin/offers:", err);
+    return res.status(500).json({ error: "Failed to load offers" });
+  }
+});
+
+// POST /api/admin/offers → create or upsert an offer
+app.post("/api/admin/offers", (req, res) => {
+  try {
+    const {
+      code,
+      type,
+      amount,
+      enabled,
+      startAt,
+      endAt,
+      applicablePlans,
+      notes,
+    } = req.body || {};
+
+    if (!code || !type || !amount) {
+      return res.status(400).json({
+        error: "code, type and amount are required",
+      });
+    }
+
+    const normalizedCode = String(code).trim().toUpperCase();
+    const normalizedType = String(type).trim().toUpperCase(); // PERCENT | FIXED
+    const numericAmount = Number(amount);
+
+    if (!numericAmount || numericAmount <= 0) {
+      return res.status(400).json({ error: "amount must be > 0" });
+    }
+    if (!["PERCENT", "FIXED"].includes(normalizedType)) {
+      return res.status(400).json({ error: "type must be PERCENT or FIXED" });
+    }
+
+    let plans = Array.isArray(applicablePlans) ? applicablePlans : [];
+    plans = plans
+      .map((p) => String(p || "").trim())
+      .filter(Boolean);
+
+    if (!plans.length) {
+      return res.status(400).json({
+        error: "At least one applicablePlans value is required",
+      });
+    }
+
+    const offers = loadOffers();
+    const idx = offers.findIndex((o) => o.code === normalizedCode);
+
+    const offerPayload = {
+      code: normalizedCode,
+      type: normalizedType,
+      amount: numericAmount,
+      enabled: enabled === false ? false : true,
+      startAt: startAt || null,
+      endAt: endAt || null,
+      applicablePlans: plans,
+      notes: notes || "",
+    };
+
+    if (idx >= 0) {
+      // update existing
+      offers[idx] = {
+        ...offers[idx],
+        ...offerPayload,
+      };
+      console.log("Updated offer:", normalizedCode);
+    } else {
+      // create new
+      offers.push(offerPayload);
+      console.log("Created new offer:", normalizedCode);
+    }
+
+    saveOffers(offers);
+    return res.json({ success: true, offer: offerPayload });
+  } catch (err) {
+    console.error("Error in POST /api/admin/offers:", err);
+    return res.status(500).json({ error: "Failed to save offer" });
+  }
+});
+
+// PATCH /api/admin/offers/:code → partial update (used mainly for enable/disable)
+app.patch("/api/admin/offers/:code", (req, res) => {
+  try {
+    const codeParam = (req.params.code || "").toUpperCase();
+    if (!codeParam) {
+      return res.status(400).json({ error: "Offer code is required in URL" });
+    }
+
+    const offers = loadOffers();
+    const idx = offers.findIndex((o) => o.code === codeParam);
+
+    if (idx < 0) {
+      return res.status(404).json({ error: "Offer not found" });
+    }
+
+    const patch = req.body || {};
+
+    if (patch.type) {
+      const t = String(patch.type).toUpperCase();
+      if (["PERCENT", "FIXED"].includes(t)) {
+        offers[idx].type = t;
+      }
+    }
+
+    if (patch.amount !== undefined) {
+      const amt = Number(patch.amount);
+      if (amt > 0) {
+        offers[idx].amount = amt;
+      }
+    }
+
+    if (patch.enabled !== undefined) {
+      offers[idx].enabled = !!patch.enabled;
+    }
+
+    if (patch.startAt !== undefined) {
+      offers[idx].startAt = patch.startAt || null;
+    }
+    if (patch.endAt !== undefined) {
+      offers[idx].endAt = patch.endAt || null;
+    }
+
+    if (patch.applicablePlans) {
+      let plans = Array.isArray(patch.applicablePlans)
+        ? patch.applicablePlans
+        : [];
+      plans = plans
+        .map((p) => String(p || "").trim())
+        .filter(Boolean);
+      if (plans.length) {
+        offers[idx].applicablePlans = plans;
+      }
+    }
+
+    if (patch.notes !== undefined) {
+      offers[idx].notes = patch.notes || "";
+    }
+
+    saveOffers(offers);
+    return res.json({ success: true, offer: offers[idx] });
+  } catch (err) {
+    console.error("Error in PATCH /api/admin/offers/:code:", err);
+    return res.status(500).json({ error: "Failed to update offer" });
+  }
+});
+
+// DELETE /api/admin/offers/:code → remove an offer
+app.delete("/api/admin/offers/:code", (req, res) => {
+  try {
+    const codeParam = (req.params.code || "").toUpperCase();
+    if (!codeParam) {
+      return res.status(400).json({ error: "Offer code is required in URL" });
+    }
+
+    const offers = loadOffers();
+    const beforeCount = offers.length;
+    const filtered = offers.filter((o) => o.code !== codeParam);
+
+    if (filtered.length === beforeCount) {
+      return res.status(404).json({ error: "Offer not found" });
+    }
+
+    saveOffers(filtered);
+    console.log("Deleted offer:", codeParam);
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("Error in DELETE /api/admin/offers/:code:", err);
+    return res.status(500).json({ error: "Failed to delete offer" });
+  }
+});
+
 // Validate if a given couponCode is applicable to a planId
 function validateOfferForPlan(planId, couponCode) {
   if (!couponCode) return { valid: false };
