@@ -5,6 +5,20 @@ const path = require("path");
 
 const ADMIN_OFFERS_SECRET = process.env.ADMIN_OFFERS_SECRET || "change-me-in-env";
 
+// ---------------------------------------------------------------------
+//  ADMIN AUTH MIDDLEWARE (OFFERS)
+// ---------------------------------------------------------------------
+function requireAdminSecret(req, res, next) {
+  const headerSecret = req.headers["x-admin-secret"];
+
+  if (!headerSecret || headerSecret !== ADMIN_OFFERS_SECRET) {
+    console.warn("Admin auth failed for /api/admin/offers");
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  next();
+}
+
 // Where offers will be stored (used by admin panel & public offer validation)
 const OFFERS_FILE = path.join(__dirname, "offers.json");
 
