@@ -50,11 +50,13 @@ function loadOffers() {
 //  ONE-TIME PLAN PRICING + OFFER LOGIC
 // ---------------------------------------------------------------------
 
-// Base prices (INR, before GST). Adjust as needed.
+// Base prices (INR, before GST) for ONE-TIME plans.
+// Must match the planId values used in frontend + offers-admin.
 const ONE_TIME_PLAN_PRICES = {
-  ONE_TIME_30: 15000, // 30-video engine
-  ONE_TIME_60: 30000, // 60-video engine
-  ONE_TIME_CUSTOM: 0, // can override per deal
+  PLAN_CALL: 5000,   // 60-Minute Consultation
+  PLAN_60: 40000,    // One-Time: Up to 60 Videos
+  PLAN_90: 50000,    // One-Time: Up to 90 Videos
+  PLAN_120: 55000,   // One-Time: Up to 120 Videos
 };
 
 // Compute base + GST + total for a one-time plan
