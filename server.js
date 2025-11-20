@@ -117,7 +117,7 @@ function saveOffers(offersArray) {
  */
 
 // GET /api/admin/offers  → list all offers
-app.get("/api/admin/offers", (req, res) => {
+app.get("/api/admin/offers", requireAdminSecret, (req, res) => {
   try {
     const offers = loadOffers();
     return res.json(offers);
@@ -128,7 +128,7 @@ app.get("/api/admin/offers", (req, res) => {
 });
 
 // POST /api/admin/offers → create or upsert an offer
-app.post("/api/admin/offers", (req, res) => {
+app.post("/api/admin/offers", requireAdminSecret, (req, res) => {
   try {
     const {
       code,
@@ -205,7 +205,7 @@ app.post("/api/admin/offers", (req, res) => {
 });
 
 // PATCH /api/admin/offers/:code → partial update (used mainly for enable/disable)
-app.patch("/api/admin/offers/:code", (req, res) => {
+app.patch("/api/admin/offers/:code", requireAdminSecret, (req, res) => {
   try {
     const codeParam = (req.params.code || "").toUpperCase();
     if (!codeParam) {
@@ -271,7 +271,7 @@ app.patch("/api/admin/offers/:code", (req, res) => {
 });
 
 // DELETE /api/admin/offers/:code → remove an offer
-app.delete("/api/admin/offers/:code", (req, res) => {
+app.delete("/api/admin/offers/:code", requireAdminSecret, (req, res) => {
   try {
     const codeParam = (req.params.code || "").toUpperCase();
     if (!codeParam) {
