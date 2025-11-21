@@ -73,6 +73,11 @@ const ONE_TIME_PLAN_PRICES = {
   PLAN_120: 55000,   // One-Time: Up to 120 Videos
 };
 
+const STARTER_PRO_PLAN_PRICES = {
+  SP_STARTER: 15000,
+  SP_PRO: 30000,
+};
+
 // Compute base + GST + total for a one-time plan
 function computeOneTimePrice(planId, customBasePrice) {
   let base = ONE_TIME_PLAN_PRICES[planId] ?? 0;
