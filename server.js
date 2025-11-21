@@ -577,6 +577,213 @@ app.post("/create-onetime-order", async (req, res) => {
 });
 
 // ---------------------------------------------------------------------
+//  ENTERPRISE – CREATE RAZORPAY ORDER (60 / 90 / 120 / consultation)
+// ---------------------------------------------------------------------
+
+app.post("/api/create-enterprise-order", async (req, res) => {
+  try {
+    const {
+      fullName,
+      email,
+      waCountryCode,
+      waNumber,
+      company,
+      gstStatus,
+      gstNumber,
+      country,
+      city,
+      state,
+      postalCode,
+      package: pkg,      // "60" | "90" | "120" | "consultation"
+      billingType,       // "subscription" | "monthly" | "yearly" | "one_time"
+      isConsultation,    // boolean from front-end
+      coupon,            // couponCode
+    } = req.body || {};
+
+    // Basic validation
+    if (!fullName || !email || !waCountryCode || !waNumber || !pkg) {
+      return res.status(400).json({ message: "Missing required fields." });
+    }
+
+    // If GST = yes, company is mandatory
+    if (gstStatus === "yes" && !company) {
+      return res.status(400).json({
+        message: "Company / Brand name is required for GST invoice.",
+      });
+    }
+
+    // ------------------------------------------
+    // 0. Map package → internal enterprise planId
+    //    (used by offers.json via applicablePlans)
+//    ENT_60, ENT_90, ENT_120, ENT_CONSULT
+    // ------------------------------------------
+    let planId = null;
+    if (pkg === "60") planId = "ENT_60";
+    else if (pkg === "90") planId = "ENT_90";
+    else if (pkg === "120") planId = "ENT_120";
+    else if (pkg === "consultation") planId = "ENT_CONSULT";
+
+    if (!planId) {
+      return res.status(400).json({ message: "Invalid enterprise package." });
+    }
+
+    // ------------------------------------------
+    // 1. Price matrix (INR, pre-GST)
+    // ------------------------------------------
+    const BASE_MONTHLY = {
+      "60": 40000,   // ₹40,000
+      "90": 50000,   // ₹50,000
+      "120": 55000,  // ₹55,000
+    };
+    const CONSULTATION_FEE = 5000; // ₹5,000
+
+    // Normalize billing type
+    let billing = billingType || "one_time";
+    if (billing === "subscription") billing = "monthly";
+
+    // Force one-time for consultation
+    const consultation =
+      pkg === "consultation" || Boolean(isConsultation);
+    if (consultation) {
+      billing = "one_time";
+    }
+
+    // ------------------------------------------
+    // 2. Base amount (pre-GST, before coupons)
+    // ------------------------------------------
+    let baseAmount = 0; // INR
+
+    if (consultation) {
+      baseAmount = CONSULTATION_FEE;
+    } else {
+      const monthly = BASE_MONTHLY[pkg];
+      if (!monthly) {
+        return res.status(400).json({ message: "Invalid enterprise package." });
+      }
+
+      if (billing === "yearly") {
+        // 12 months with 20% discount
+        baseAmount = monthly * 12 * 0.8;
+      } else {
+        // "monthly" or "one_time" → charge one month’s amount per payment
+        baseAmount = monthly;
+      }
+    }
+
+    // ------------------------------------------
+    // 3. GST – 18% for India only
+    // ------------------------------------------
+    const isIndia =
+      country &&
+      country.toString().trim().toLowerCase() === "india";
+
+    let baseWithGst = baseAmount;
+    let gstAmount = 0;
+
+    if (isIndia) {
+      gstAmount = Math.round(baseAmount * 0.18);
+      baseWithGst = baseAmount + gstAmount;
+    }
+
+    // ------------------------------------------
+    // 4. Apply offer via existing offers engine
+    //    (offers.json + /offers-admin.html)
+//    use planId: ENT_60 / ENT_90 / ENT_120 / ENT_CONSULT
+    // ------------------------------------------
+    const { valid, offer } = validateOfferForPlan(planId, coupon);
+
+    let finalAmount = baseWithGst;
+    let discount = 0;
+    let offerDescription = null;
+    let offerMeta = null;
+
+    if (valid && offer) {
+      const calc = applyOffer(baseWithGst, offer);
+      finalAmount = calc.final;
+      discount = calc.discount;
+      offerDescription = calc.description;
+      offerMeta = {
+        code: offer.code,
+        type: offer.type,
+        amount: offer.amount,
+      };
+    }
+
+    // Round & convert to paise for Razorpay
+    const amountInPaise = Math.round(finalAmount * 100);
+
+    // ------------------------------------------
+    // 5. Create Razorpay order
+    // ------------------------------------------
+    const receiptId =
+      "VVAS_ENT_" +
+      Date.now().toString(36) +
+      "_" +
+      Math.random().toString(36).slice(2, 7);
+
+    const order = await razorpay.orders.create({
+      amount: amountInPaise,
+      currency: "INR",
+      receipt: receiptId,
+      notes: {
+        product: "VVAS",
+        segment: "enterprise",
+        planId,
+        package: pkg,
+        billing_type: billing,
+        is_consultation: consultation ? "yes" : "no",
+        fullName,
+        email,
+        phone: waCountryCode + waNumber,
+        company: company || "",
+        gstStatus: gstStatus || "",
+        gstNumber: gstNumber || "",
+        country: country || "",
+        city: city || "",
+        state: state || "",
+        postalCode: postalCode || "",
+        coupon: coupon || "",
+        baseAmount: String(baseAmount),
+        gstAmount: String(gstAmount),
+        grossTotal: String(baseWithGst),
+        discount: String(discount),
+        finalAmount: String(finalAmount),
+        offerDescription: offerDescription || "",
+      },
+    });
+
+    // ------------------------------------------
+    // 6. Respond to front-end
+    // ------------------------------------------
+    return res.json({
+      success: true,
+      razorpayKey: process.env.RAZORPAY_KEY_ID,
+      orderId: order.id,
+      amountInPaise,
+      currency: order.currency,
+      pricing: {
+        base: baseAmount,
+        gst: gstAmount,
+        total: baseWithGst,
+        discount,
+        final: finalAmount,
+      },
+      offerApplied: !!offerMeta,
+      offer: offerMeta,
+      description: consultation
+        ? "VVAS – Paid consultation call (enterprise)"
+        : `VVAS Enterprise – ${pkg} videos / month (${billing})`,
+    });
+  } catch (err) {
+    console.error("Error in /api/create-enterprise-order", err);
+    return res.status(500).json({
+      success: false,
+      message: "Server error creating enterprise order.",
+    });
+  }
+});
+
+// ---------------------------------------------------------------------
 //  VERIFY RAZORPAY PAYMENT (EXISTING) → n8n for subscriptions / generic
 // ---------------------------------------------------------------------
 
