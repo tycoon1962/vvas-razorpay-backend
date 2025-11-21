@@ -834,6 +834,124 @@ app.post("/api/create-enterprise-order", async (req, res) => {
 });
 
 // ---------------------------------------------------------------------
+//  STARTER/PRO: CREATE RAZORPAY ORDER (with offers.json)
+// ---------------------------------------------------------------------
+
+app.post("/api/create-starterpro-order", async (req, res) => {
+  try {
+    const { plan, billingType, country, coupon } = req.body || {};
+
+    if (!plan) {
+      return res.status(400).json({
+        success: false,
+        error: "plan is required",
+      });
+    }
+
+    const planNormalized = plan === "pro" ? "pro" : "starter";
+    const planId = planNormalized === "starter" ? "SP_STARTER" : "SP_PRO";
+
+    let base = STARTER_PRO_PLAN_PRICES[planId];
+    if (!base) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid plan",
+      });
+    }
+
+    // Normalise billing type
+    let bt = (billingType || "monthly").toLowerCase();
+    if (bt === "subscription") bt = "monthly";
+
+    // Billing rules
+    if (bt === "yearly") {
+      const yearlyBeforeDiscount = base * 12;
+      base = Math.round(yearlyBeforeDiscount * 0.8); // 20% discount
+    } else {
+      // monthly / one_time → single month base
+      base = base;
+    }
+
+    const isIndia = (country || "").trim().toLowerCase() === "india";
+    const gst = isIndia ? Math.round(base * 0.18) : 0;
+    const total = base + gst;
+
+    // Offer engine
+    const result = validateOfferForPlan(planId, coupon);
+    let finalAmount = total;
+    let discount = 0;
+    let offerDescription = null;
+    let offerMeta = null;
+
+    if (result.valid) {
+      const calc = applyOffer(total, result.offer);
+      finalAmount = calc.final;
+      discount = calc.discount;
+      offerDescription = calc.description;
+      offerMeta = {
+        code: result.offer.code,
+        type: result.offer.type,
+        amount: result.offer.amount,
+      };
+    }
+
+    const amountInPaise = Math.round(finalAmount * 100);
+    const receiptId =
+      "VVAS_SP_" +
+      Date.now().toString(36) +
+      "_" +
+      Math.random().toString(36).slice(2, 7);
+
+    const order = await razorpay.orders.create({
+      amount: amountInPaise,
+      currency: "INR",
+      receipt: receiptId,
+      notes: {
+        product: "VVAS",
+        segment: "starterpro",
+        planId,
+        plan: planNormalized,
+        billingType: bt,
+        country: country || "",
+        basePrice: String(base),
+        gstAmount: String(gst),
+        grossTotal: String(total),
+        discount: String(discount),
+        finalAmount: String(finalAmount),
+        couponCode: coupon || "",
+        offerDescription: offerDescription || "",
+      },
+    });
+
+    return res.json({
+      success: true,
+      razorpayKey: process.env.RAZORPAY_KEY_ID,
+      orderId: order.id,
+      amount: finalAmount,
+      amountInPaise,
+      currency: order.currency,
+      planId,
+      pricing: {
+        base,
+        gst,
+        total,
+        discount,
+        final: finalAmount,
+      },
+      offerApplied: !!offerMeta,
+      offer: offerMeta,
+    });
+  } catch (err) {
+    console.error("Error in /api/create-starterpro-order:", err);
+    return res.status(500).json({
+      success: false,
+      error: "Server error creating starter/pro order.",
+      details: err.message,
+    });
+  }
+});
+
+// ---------------------------------------------------------------------
 //  VERIFY RAZORPAY PAYMENT (EXISTING) → n8n for subscriptions / generic
 // ---------------------------------------------------------------------
 
