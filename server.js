@@ -874,7 +874,7 @@ app.post("/verify-payment", async (req, res) => {
       });
     }
 
-    // 2) (Optional but recommended): fetch payment from Razorpay to confirm status
+    // 2) Fetch payment details from Razorpay
     let paymentDetails = null;
     try {
       paymentDetails = await razorpay.payments.fetch(razorpay_payment_id);
@@ -882,7 +882,17 @@ app.post("/verify-payment", async (req, res) => {
       console.error("Error fetching payment from Razorpay:", fetchErr.message);
     }
 
-    // 3) Build payload for n8n / logging
+    // 3) Fetch order details (to get notes: enterprise vs other flows)
+    let orderDetails = null;
+    try {
+      orderDetails = await razorpay.orders.fetch(razorpay_order_id);
+    } catch (orderErr) {
+      console.error("Error fetching order from Razorpay:", orderErr.message);
+    }
+
+    const orderNotes = (orderDetails && orderDetails.notes) ? orderDetails.notes : {};
+
+    // 4) Build payload for n8n / logging
     const payloadForN8N = {
       source: "TGP-AI-VIDEO-RAZORPAY",
       verified: true,
@@ -893,12 +903,16 @@ app.post("/verify-payment", async (req, res) => {
       currency,
       customer: customer || {},
       plan: plan || {},
-      meta: meta || {},
+      meta: {
+        ...(meta || {}),
+        razorpay_order_notes: orderNotes,   // 👈 includes product: VVAS, segment: enterprise, planId, etc.
+      },
       payment_details: paymentDetails || {},
+      order_details: orderDetails || {},
       verified_at: new Date().toISOString(),
     };
 
-    // 4) Send to n8n webhook (for Google Sheets / email / WhatsApp)
+    // 5) Send to n8n webhook (for Google Sheets / email / WhatsApp)
     if (process.env.N8N_PAYMENT_WEBHOOK_URL) {
       try {
         console.log("👀 Calling n8n webhook:", process.env.N8N_PAYMENT_WEBHOOK_URL);
