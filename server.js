@@ -552,100 +552,23 @@ app.post("/api/validate-offer", (req, res) => {
 });
 
 // ---------------------------------------------------------------------
-//  CREATE RAZORPAY ORDER FOR ONE-TIME PAYMENT (with offers)
+//  CREATE RAZORPAY ORDER FOR ONE-TIME PAYMENT (RETIRED ENDPOINT)
 // ---------------------------------------------------------------------
 
-app.post("/create-onetime-order", async (req, res) => {
-  try {
-    const {
-      planId,
-      customBasePrice, // optional override
-      couponCode,
-      fullName,
-      companyName,
-      email,
-      phone,
-      whatsapp,
-      gstNumber,
-      registeredWithGst,
-    } = req.body;
+app.post("/create-onetime-order", (req, res) => {
+  console.warn(
+    "[DEPRECATED] /create-onetime-order was called. " +
+    "This endpoint is retired; use /api/create-enterprise-order instead."
+  );
 
-    if (!planId || !fullName || !email) {
-      return res
-        .status(400)
-        .json({ error: "planId, fullName and email are required" });
-    }
-
-    const basePriceNum =
-      typeof customBasePrice === "number" ? customBasePrice : undefined;
-    const { base, gst, total } = computeOneTimePrice(planId, basePriceNum);
-
-    // Validate / apply offer
-    const result = validateOfferForPlan(planId, couponCode);
-    let offerMeta = null;
-    let finalAmount = total;
-    let discount = 0;
-    let offerDescription = null;
-
-    if (result.valid) {
-      const calc = applyOffer(total, result.offer);
-      finalAmount = calc.final;
-      discount = calc.discount;
-      offerDescription = calc.description;
-      offerMeta = {
-        code: result.offer.code,
-        type: result.offer.type,
-        amount: result.offer.amount,
-      };
-    }
-
-    const amountInPaise = finalAmount * 100;
-
-    const order = await razorpay.orders.create({
-      amount: amountInPaise,
-      currency: "INR",
-      receipt: `VVAS_ONETIME_${Date.now()}`,
-      notes: {
-        planId,
-        fullName,
-        companyName: companyName || "",
-        email,
-        phone: phone || "",
-        whatsapp: whatsapp || "",
-        gstNumber: gstNumber || "",
-        registeredWithGst: registeredWithGst ? "yes" : "no",
-        basePrice: String(base),
-        gstAmount: String(gst),
-        grossTotal: String(total),
-        discount: String(discount),
-        finalAmount: String(finalAmount),
-        couponCode: couponCode || "",
-        offerDescription: offerDescription || "",
-      },
-    });
-
-    return res.json({
-      success: true,
-      razorpayKey: process.env.RAZORPAY_KEY_ID,
-      orderId: order.id,
-      amount: finalAmount,
-      amountInPaise,
-      currency: order.currency,
-      pricing: {
-        base,
-        gst,
-        total,
-        discount,
-        final: finalAmount,
-      },
-      offerApplied: !!offerMeta,
-      offer: offerMeta,
-    });
-  } catch (err) {
-    console.error("Error in /create-onetime-order", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
+  return res.status(410).json({
+    success: false,
+    message:
+      "This one-time checkout endpoint has been retired. " +
+      "Please use the Enterprise checkout flow instead.",
+  });
 });
+
 
 // ---------------------------------------------------------------------
 //  ENTERPRISE: CREATE RAZORPAY ORDER (60 / 90 / 120 / consultation)
