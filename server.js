@@ -992,107 +992,21 @@ app.post("/verify-payment", async (req, res) => {
 });
 
 // ---------------------------------------------------------------------
-//  VERIFY ONE-TIME PAYMENT → n8n (SEPARATE WORKFLOW)
+//  VERIFY ONE-TIME PAYMENT (RETIRED ENDPOINT)
 // ---------------------------------------------------------------------
 
-app.post("/verify-onetime-payment", async (req, res) => {
-  console.log(">>> /verify-onetime-payment HIT", req.body);
+app.post("/verify-onetime-payment", (req, res) => {
+  console.warn(
+    "[DEPRECATED] /verify-onetime-payment was called. " +
+    "This endpoint is retired; one-time verification is now handled by /verify-payment."
+  );
 
-  try {
-    const {
-      razorpay_payment_id,
-      razorpay_order_id,
-      razorpay_signature,
-      planId,
-      amount,
-      currency,
-      customer, // { fullName, email, phone, whatsapp, companyName, gstNumber, registeredWithGst }
-      meta,
-    } = req.body || {};
-
-    if (!razorpay_payment_id || !razorpay_order_id || !razorpay_signature) {
-      return res.status(400).json({
-        error: "Missing Razorpay payment verification fields",
-      });
-    }
-
-    // 1) Verify signature
-    const body = razorpay_order_id + "|" + razorpay_payment_id;
-
-    const expectedSignature = crypto
-      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
-      .update(body.toString())
-      .digest("hex");
-
-    const isValid = expectedSignature === razorpay_signature;
-
-    if (!isValid) {
-      console.error("Invalid Razorpay signature (one-time):", {
-        razorpay_order_id,
-        razorpay_payment_id,
-      });
-      return res.status(400).json({
-        success: false,
-        error: "Invalid signature",
-      });
-    }
-
-    // 2) Optional: fetch payment details from Razorpay
-    let paymentDetails = null;
-    try {
-      paymentDetails = await razorpay.payments.fetch(razorpay_payment_id);
-    } catch (fetchErr) {
-      console.error(
-        "Error fetching payment from Razorpay (one-time):",
-        fetchErr.message
-      );
-    }
-
-    const payloadForN8N = {
-      source: "TGP-AI-VIDEO-RAZORPAY-ONETIME",
-      verified: true,
-      razorpay_payment_id,
-      razorpay_order_id,
-      razorpay_signature,
-      planId,
-      amount,
-      currency,
-      customer: customer || {},
-      meta: meta || {},
-      payment_details: paymentDetails || {},
-      verified_at: new Date().toISOString(),
-    };
-
-    if (N8N_ONETIME_WEBHOOK_URL) {
-      try {
-        console.log("👀 Calling one-time n8n webhook:", N8N_ONETIME_WEBHOOK_URL);
-        console.log("📦 One-time payload for n8n:", JSON.stringify(payloadForN8N, null, 2));
-
-        const response = await fetch(N8N_ONETIME_WEBHOOK_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payloadForN8N),
-        });
-
-        const text = await response.text();
-        console.log("🔵 One-time n8n webhook responded with:", text);
-      } catch (webhookErr) {
-        console.error("❌ Error calling N8N_ONETIME_WEBHOOK_URL:", webhookErr);
-      }
-    }
-
-    return res.json({
-      success: true,
-      message: "One-time payment verified successfully",
-    });
-  } catch (err) {
-    console.error("Error in /verify-onetime-payment:", err);
-    return res.status(500).json({
-      success: false,
-      error: "Internal server error",
-      details: err.message,
-    });
-  }
+  return res.status(410).json({
+    success: false,
+    message:
+      "This one-time payment verification endpoint has been retired. " +
+      "Use the standard /verify-payment flow instead.",
+  });
 });
 
 // ---------------------------------------------------------------------
