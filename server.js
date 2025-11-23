@@ -15,25 +15,37 @@ const fetch = require("node-fetch");
 const axios = require("axios");
 
 // ---------------------------------------------------------------------
-//  ADMIN SECRET (NO DEFAULT PASSWORD)
+//  ADMIN SECRET (TEMPORARY HARD-CODED FOR DEBUG)
 // ---------------------------------------------------------------------
-// ---------------------------------------------------------------------
-//  ADMIN SECRET (with explicit debug + safe fallback)
-// ---------------------------------------------------------------------
-let ADMIN_OFFERS_SECRET = null;
-let ADMIN_OFFERS_SOURCE = null;
+const ADMIN_OFFERS_SECRET = "VVAS_Offers_Admin_2025!";
 
-if (process.env.ADMIN_OFFERS_SECRET && process.env.ADMIN_OFFERS_SECRET.trim().length) {
-  ADMIN_OFFERS_SECRET = process.env.ADMIN_OFFERS_SECRET.trim();
-  ADMIN_OFFERS_SOURCE = "ENV";
-} else {
-  // TEMPORARY FALLBACK so you can definitely log in
-  ADMIN_OFFERS_SECRET = "change-me-in-env";
-  ADMIN_OFFERS_SOURCE = "FALLBACK";
-}
-
-console.log("[ADMIN] Using ADMIN_OFFERS_SECRET from:", ADMIN_OFFERS_SOURCE);
 console.log("[ADMIN] EXPECTED SECRET VALUE =", JSON.stringify(ADMIN_OFFERS_SECRET));
+
+// Where offers will be stored (used by admin panel & public offer validation)
+const OFFERS_FILE = path.join(__dirname, "offers.json");
+
+// ---------------------------------------------------------------------
+//  ADMIN AUTH MIDDLEWARE (OFFERS)
+// ---------------------------------------------------------------------
+function requireAdminSecret(req, res, next) {
+  const headerSecret = req.headers["x-admin-secret"] || "";
+
+  // Debug so we see exactly what the browser is sending
+  console.log("[ADMIN] Incoming x-admin-secret =", JSON.stringify(headerSecret));
+
+  if (!headerSecret) {
+    return res
+      .status(401)
+      .json({ error: "Unauthorized: missing admin secret" });
+  }
+
+  if (headerSecret !== ADMIN_OFFERS_SECRET) {
+    console.warn("[ADMIN] Invalid admin secret.");
+    return res.status(401).json({ error: "Unauthorized: invalid admin secret" });
+  }
+
+  next();
+}
 
 
 // Where offers will be stored (used by admin panel & public offer validation)
