@@ -48,9 +48,6 @@ function requireAdminSecret(req, res, next) {
   next();
 }
 
-// Where offers will be stored (used by admin panel & public offer validation)
-const OFFERS_FILE = path.join(__dirname, "offers.json");
-
 // ---------------------------------------------------------------------
 //  ADMIN AUTH MIDDLEWARE (OFFERS)
 // ---------------------------------------------------------------------
