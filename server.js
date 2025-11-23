@@ -313,25 +313,43 @@ function getEnterprisePlanId(pkg, billingType) {
  */
 
 // GET /api/admin/plans  → used by offers-admin.html to show plan checkboxes & filters
+// ---------------------------------------------------------------------
+//  ADMIN: RETURN AVAILABLE PLANS FOR OFFERS PANEL
+// ---------------------------------------------------------------------
 app.get("/api/admin/plans", requireAdminSecret, (req, res) => {
-  // These IDs must match the planId used in pricing + order creation
-  const plans = [
-    { id: "SP_STARTER", label: "Starter (Subscription / Monthly Base)" },
-    { id: "SP_PRO", label: "Pro (Subscription / Monthly Base)" },
+  try {
+    // This is intentionally simple and cannot throw.
+    // These IDs are what offers.json will use in `applicablePlans`.
+    const plans = [
+      // Starter / Pro subscriptions
+      { id: "SP_STARTER", label: "Starter – Subscription" },
+      { id: "SP_PRO",     label: "Pro – Subscription" },
 
-    { id: "ENT_60_MONTHLY", label: "Enterprise 60 – Monthly" },
-    { id: "ENT_60_YEARLY", label: "Enterprise 60 – Yearly" },
+      // Enterprise subscriptions / billing types
+      { id: "ENT_60_MONTHLY",  label: "Enterprise 60 – Monthly" },
+      { id: "ENT_60_YEARLY",   label: "Enterprise 60 – Yearly" },
+      { id: "ENT_90_MONTHLY",  label: "Enterprise 90 – Monthly" },
+      { id: "ENT_90_YEARLY",   label: "Enterprise 90 – Yearly" },
+      { id: "ENT_120_MONTHLY", label: "Enterprise 120 – Monthly" },
+      { id: "ENT_120_YEARLY",  label: "Enterprise 120 – Yearly" },
 
-    { id: "ENT_90_MONTHLY", label: "Enterprise 90 – Monthly" },
-    { id: "ENT_90_YEARLY", label: "Enterprise 90 – Yearly" },
+      // Enterprise consultation (one-time)
+      { id: "ENT_CONSULTATION_ONE_TIME", label: "Enterprise – Consultation Call (One-time)" },
 
-    { id: "ENT_120_MONTHLY", label: "Enterprise 120 – Monthly" },
-    { id: "ENT_120_YEARLY", label: "Enterprise 120 – Yearly" },
+      // Legacy / one-time engine plans
+      { id: "PLAN_CALL", label: "One-time – 60-min Consultation" },
+      { id: "PLAN_60",   label: "One-time – Up to 60 Videos" },
+      { id: "PLAN_90",   label: "One-time – Up to 90 Videos" },
+      { id: "PLAN_120",  label: "One-time – Up to 120 Videos" }
+    ];
 
-    { id: "ENT_CONSULTATION_ONE_TIME", label: "Enterprise – Consultation (One-time)" },
-  ];
-  res.json(plans);
+    return res.json(plans);
+  } catch (err) {
+    console.error("Error in GET /api/admin/plans:", err);
+    return res.status(500).json({ error: "Failed to load plans" });
+  }
 });
+
 
 // GET /api/admin/offers  → list all offers
 app.get("/api/admin/offers", requireAdminSecret, (req, res) => {
