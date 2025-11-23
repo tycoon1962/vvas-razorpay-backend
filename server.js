@@ -1,42 +1,60 @@
 // server.js
 
+// ---------------------------------------------------------------------
+//  ENV + CORE IMPORTS
+// ---------------------------------------------------------------------
+require("dotenv").config();
+
 const fs = require("fs");
 const path = require("path");
-
-const ADMIN_OFFERS_SECRET = process.env.ADMIN_OFFERS_SECRET || "change-me-in-env";
-
-// ---------------------------------------------------------------------
-//  ADMIN AUTH MIDDLEWARE (OFFERS)
-// ---------------------------------------------------------------------
-function requireAdminSecret(req, res, next) {
-  const headerSecret = req.headers["x-admin-secret"];
-
-  if (!headerSecret || headerSecret !== ADMIN_OFFERS_SECRET) {
-    console.warn("Admin auth failed for /api/admin/offers");
-    return res.status(401).json({ error: "Unauthorized" });
-  }
-
-  next();
-}
-
-// Where offers will be stored (used by admin panel & public offer validation)
-const OFFERS_FILE = path.join(__dirname, "offers.json");
-
-require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const Razorpay = require("razorpay");
 const crypto = require("crypto");
 const fetch = require("node-fetch");
 const axios = require("axios");
+
+// ---------------------------------------------------------------------
+//  ADMIN SECRET (NO DEFAULT PASSWORD)
+// ---------------------------------------------------------------------
+const ADMIN_OFFERS_SECRET = process.env.ADMIN_OFFERS_SECRET;
+
+// Where offers will be stored (used by admin panel & public offer validation)
+const OFFERS_FILE = path.join(__dirname, "offers.json");
+
+// ---------------------------------------------------------------------
+//  ADMIN AUTH MIDDLEWARE (OFFERS)
+// ---------------------------------------------------------------------
+function requireAdminSecret(req, res, next) {
+  if (!ADMIN_OFFERS_SECRET) {
+    console.error("[ADMIN] Missing ADMIN_OFFERS_SECRET in environment.");
+    return res.status(500).json({
+      error: "ADMIN_OFFERS_SECRET is not configured on the server.",
+    });
+  }
+
+  const headerSecret = req.headers["x-admin-secret"];
+
+  if (!headerSecret || headerSecret !== ADMIN_OFFERS_SECRET) {
+    console.warn("Admin auth failed for /api/admin route.");
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  next();
+}
+
+// ---------------------------------------------------------------------
+//  EXPRESS APP + MIDDLEWARE
+// ---------------------------------------------------------------------
 const app = express();
 
-// Middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cors());
 
-// Razorpay instance
+// ---------------------------------------------------------------------
+//  RAZORPAY INSTANCE
+// ---------------------------------------------------------------------
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
   key_secret: process.env.RAZORPAY_KEY_SECRET,
@@ -45,7 +63,7 @@ const razorpay = new Razorpay({
 const N8N_ONETIME_WEBHOOK_URL = process.env.N8N_ONETIME_WEBHOOK_URL;
 
 // ---------------------------------------------------------------------
-//  OFFERS STORAGE (READ-ONLY HERE; ADMIN PANEL WRITES THIS FILE)
+//  OFFERS STORAGE HELPERS
 // ---------------------------------------------------------------------
 
 function loadOffers() {
@@ -53,10 +71,99 @@ function loadOffers() {
     if (!fs.existsSync(OFFERS_FILE)) return [];
     const raw = fs.readFileSync(OFFERS_FILE, "utf8");
     if (!raw.trim()) return [];
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    const arr = Array.isArray(parsed) ? parsed : [];
+
+    // Normalize to new schema (active/appliesTo/validity/etc.) as far as possible
+    return arr.map((o) => {
+      const offer = { ...o };
+
+      // Backwards compat: enabled → active
+      if (offer.active === undefined && typeof offer.enabled === "boolean") {
+        offer.active = offer.enabled;
+      }
+      if (offer.active === undefined) {
+        offer.active = true;
+      }
+
+      // Backwards compat: startAt / endAt → validity.{start,end}
+      if (!offer.validity) {
+        offer.validity = {
+          start: offer.startAt || null,
+          end: offer.endAt || null,
+        };
+      }
+
+      // Backwards compat: applicablePlans → appliesTo.plans
+      if (!offer.appliesTo) {
+        offer.appliesTo = {
+          plans: Array.isArray(offer.applicablePlans)
+            ? offer.applicablePlans
+            : [],
+          billingTypes: Array.isArray(offer.billingTypes)
+            ? offer.billingTypes
+            : [],
+          countries: Array.isArray(offer.countries) ? offer.countries : [],
+        };
+      } else {
+        if (!Array.isArray(offer.appliesTo.plans)) {
+          offer.appliesTo.plans = [];
+        }
+        if (!Array.isArray(offer.appliesTo.billingTypes)) {
+          offer.appliesTo.billingTypes = [];
+        }
+        if (!Array.isArray(offer.appliesTo.countries)) {
+          offer.appliesTo.countries = [];
+        }
+      }
+
+      // Normalize type
+      if (offer.type) {
+        offer.type = String(offer.type).toUpperCase();
+      }
+
+      // Ensure amount is numeric
+      if (offer.amount !== undefined) {
+        offer.amount = Number(offer.amount);
+      }
+
+      // Defaults for usage tracking
+      if (offer.usageLimit !== null && offer.usageLimit !== undefined) {
+        offer.usageLimit = Number(offer.usageLimit);
+      } else {
+        offer.usageLimit = null;
+      }
+
+      if (offer.used === undefined) {
+        offer.used = 0;
+      } else {
+        offer.used = Number(offer.used) || 0;
+      }
+
+      // Description fallback from notes
+      if (!offer.description && offer.notes) {
+        offer.description = offer.notes;
+      }
+
+      return offer;
+    });
   } catch (err) {
     console.error("Error reading offers.json", err);
     return [];
+  }
+}
+
+function saveOffers(offersArray) {
+  try {
+    fs.writeFileSync(
+      OFFERS_FILE,
+      JSON.stringify(offersArray, null, 2),
+      "utf8"
+    );
+    console.log("offers.json updated. Total offers:", offersArray.length);
+  } catch (err) {
+    console.error("Error writing offers.json", err);
+    throw err;
   }
 }
 
@@ -67,10 +174,10 @@ function loadOffers() {
 // Base prices (INR, before GST) for ONE-TIME plans.
 // Must match the planId values used in frontend + offers-admin.
 const ONE_TIME_PLAN_PRICES = {
-  PLAN_CALL: 5000,   // 60-Minute Consultation
-  PLAN_60: 40000,    // One-Time: Up to 60 Videos
-  PLAN_90: 50000,    // One-Time: Up to 90 Videos
-  PLAN_120: 55000,   // One-Time: Up to 120 Videos
+  PLAN_CALL: 5000, // 60-Minute Consultation
+  PLAN_60: 40000,  // One-Time: Up to 60 Videos
+  PLAN_90: 50000,  // One-Time: Up to 90 Videos
+  PLAN_120: 55000, // One-Time: Up to 120 Videos
 };
 
 const STARTER_PRO_PLAN_PRICES = {
@@ -98,7 +205,6 @@ function computeOneTimePrice(planId, customBasePrice) {
 // ---------------------------------------------------------------------
 
 // Base monthly prices (INR, before GST) for ENTERPRISE plans.
-// Used for 60 / 90 / 120 videos, plus consultation.
 const ENTERPRISE_BASE_PRICES = {
   "60": 40000,        // 60 videos / month
   "90": 50000,        // 90 videos / month
@@ -107,9 +213,6 @@ const ENTERPRISE_BASE_PRICES = {
 };
 
 // Compute enterprise base + GST + total
-// pkg: "60" | "90" | "120" | "consultation"
-// billingType: "subscription" | "monthly" | "yearly" | "one_time"
-// country: e.g. "India" → GST applied
 function computeEnterprisePrice(pkg, billingType, country) {
   const baseMonthly = ENTERPRISE_BASE_PRICES[pkg];
   if (!baseMonthly) {
@@ -140,7 +243,7 @@ function computeEnterprisePrice(pkg, billingType, country) {
 }
 
 // Build a planId for offers.json so coupons can target
-// ENT_60_SUBSCRIPTION, ENT_60_YEARLY, ENT_60_ONE_TIME, ENT_CONSULTATION_ONE_TIME, etc.
+// ENT_60_MONTHLY, ENT_60_YEARLY, ENT_60_ONE_TIME, ENT_CONSULTATION_ONE_TIME, etc.
 function getEnterprisePlanId(pkg, billingType) {
   let baseId;
   if (pkg === "consultation") {
@@ -160,32 +263,51 @@ function getEnterprisePlanId(pkg, billingType) {
 }
 
 // ---------------------------------------------------------------------
-//  OFFERS ADMIN – READ / WRITE offers.json
+//  OFFERS ADMIN – API (MATCHES NEW offers-admin.html)
 // ---------------------------------------------------------------------
 
-function saveOffers(offersArray) {
-  try {
-    fs.writeFileSync(OFFERS_FILE, JSON.stringify(offersArray, null, 2), "utf8");
-    console.log("offers.json updated. Total offers:", offersArray.length);
-  } catch (err) {
-    console.error("Error writing offers.json", err);
-    throw err;
-  }
-}
-
 /**
- * Shape of an offer in offers.json:
+ * New canonical shape of an offer in offers.json:
  * {
- *   code: "DIWALI20",
+ *   code: "STARTER20",
  *   type: "PERCENT" | "FIXED",
- *   amount: 20,                    // percent or INR
- *   enabled: true,
- *   startAt: "2025-11-20T00:00:00.000Z" | null,
- *   endAt: "2025-12-01T00:00:00.000Z" | null,
- *   applicablePlans: ["PLAN_60", "PLAN_90"],
- *   notes: "Intro offer for one-time plans"
+ *   amount: 20,
+ *   description: "Short note",
+ *   active: true,
+ *   appliesTo: {
+ *     plans: ["SP_STARTER", "SP_PRO", "ENT_60_MONTHLY", ...],
+ *     billingTypes: ["monthly", "yearly", "one_time"],
+ *     countries: ["India", "United States"]
+ *   },
+ *   usageLimit: 50, // optional
+ *   used: 0,        // optional
+ *   validity: {
+ *     start: "2025-11-20",
+ *     end: "2025-12-01"
+ *   }
  * }
  */
+
+// GET /api/admin/plans  → used by offers-admin.html to show plan checkboxes & filters
+app.get("/api/admin/plans", requireAdminSecret, (req, res) => {
+  // These IDs must match the planId used in pricing + order creation
+  const plans = [
+    { id: "SP_STARTER", label: "Starter (Subscription / Monthly Base)" },
+    { id: "SP_PRO", label: "Pro (Subscription / Monthly Base)" },
+
+    { id: "ENT_60_MONTHLY", label: "Enterprise 60 – Monthly" },
+    { id: "ENT_60_YEARLY", label: "Enterprise 60 – Yearly" },
+
+    { id: "ENT_90_MONTHLY", label: "Enterprise 90 – Monthly" },
+    { id: "ENT_90_YEARLY", label: "Enterprise 90 – Yearly" },
+
+    { id: "ENT_120_MONTHLY", label: "Enterprise 120 – Monthly" },
+    { id: "ENT_120_YEARLY", label: "Enterprise 120 – Yearly" },
+
+    { id: "ENT_CONSULTATION_ONE_TIME", label: "Enterprise – Consultation (One-time)" },
+  ];
+  res.json(plans);
+});
 
 // GET /api/admin/offers  → list all offers
 app.get("/api/admin/offers", requireAdminSecret, (req, res) => {
@@ -198,18 +320,18 @@ app.get("/api/admin/offers", requireAdminSecret, (req, res) => {
   }
 });
 
-// POST /api/admin/offers → create or upsert an offer
+// POST /api/admin/offers → create or upsert an offer (new schema)
 app.post("/api/admin/offers", requireAdminSecret, (req, res) => {
   try {
     const {
       code,
       type,
       amount,
-      enabled,
-      startAt,
-      endAt,
-      applicablePlans,
-      notes,
+      description,
+      active,
+      appliesTo,
+      usageLimit,
+      validity,
     } = req.body || {};
 
     if (!code || !type || !amount) {
@@ -229,14 +351,22 @@ app.post("/api/admin/offers", requireAdminSecret, (req, res) => {
       return res.status(400).json({ error: "type must be PERCENT or FIXED" });
     }
 
-    let plans = Array.isArray(applicablePlans) ? applicablePlans : [];
-    plans = plans
-      .map((p) => String(p || "").trim())
-      .filter(Boolean);
+    const plans =
+      appliesTo && Array.isArray(appliesTo.plans)
+        ? appliesTo.plans.map((p) => String(p || "").trim()).filter(Boolean)
+        : [];
+    const billingTypes =
+      appliesTo && Array.isArray(appliesTo.billingTypes)
+        ? appliesTo.billingTypes.map((b) => String(b || "").trim()).filter(Boolean)
+        : [];
+    const countries =
+      appliesTo && Array.isArray(appliesTo.countries)
+        ? appliesTo.countries.map((c) => String(c || "").trim()).filter(Boolean)
+        : [];
 
     if (!plans.length) {
       return res.status(400).json({
-        error: "At least one applicablePlans value is required",
+        error: "At least one plan (appliesTo.plans) is required",
       });
     }
 
@@ -247,11 +377,22 @@ app.post("/api/admin/offers", requireAdminSecret, (req, res) => {
       code: normalizedCode,
       type: normalizedType,
       amount: numericAmount,
-      enabled: enabled === false ? false : true,
-      startAt: startAt || null,
-      endAt: endAt || null,
-      applicablePlans: plans,
-      notes: notes || "",
+      description: description || "",
+      active: active === false ? false : true,
+      appliesTo: {
+        plans,
+        billingTypes,
+        countries,
+      },
+      usageLimit:
+        usageLimit === null || usageLimit === undefined
+          ? null
+          : Number(usageLimit),
+      used: 0,
+      validity: {
+        start: validity && validity.start ? validity.start : null,
+        end: validity && validity.end ? validity.end : null,
+      },
     };
 
     if (idx >= 0) {
@@ -275,8 +416,8 @@ app.post("/api/admin/offers", requireAdminSecret, (req, res) => {
   }
 });
 
-// PATCH /api/admin/offers/:code → partial update (used mainly for enable/disable)
-app.patch("/api/admin/offers/:code", requireAdminSecret, (req, res) => {
+// PATCH /api/admin/offers/:code/enable → mark offer as active
+app.patch("/api/admin/offers/:code/enable", requireAdminSecret, (req, res) => {
   try {
     const codeParam = (req.params.code || "").toUpperCase();
     if (!codeParam) {
@@ -290,54 +431,40 @@ app.patch("/api/admin/offers/:code", requireAdminSecret, (req, res) => {
       return res.status(404).json({ error: "Offer not found" });
     }
 
-    const patch = req.body || {};
-
-    if (patch.type) {
-      const t = String(patch.type).toUpperCase();
-      if (["PERCENT", "FIXED"].includes(t)) {
-        offers[idx].type = t;
-      }
-    }
-
-    if (patch.amount !== undefined) {
-      const amt = Number(patch.amount);
-      if (amt > 0) {
-        offers[idx].amount = amt;
-      }
-    }
-
-    if (patch.enabled !== undefined) {
-      offers[idx].enabled = !!patch.enabled;
-    }
-
-    if (patch.startAt !== undefined) {
-      offers[idx].startAt = patch.startAt || null;
-    }
-    if (patch.endAt !== undefined) {
-      offers[idx].endAt = patch.endAt || null;
-    }
-
-    if (patch.applicablePlans) {
-      let plans = Array.isArray(patch.applicablePlans)
-        ? patch.applicablePlans
-        : [];
-      plans = plans
-        .map((p) => String(p || "").trim())
-        .filter(Boolean);
-      if (plans.length) {
-        offers[idx].applicablePlans = plans;
-      }
-    }
-
-    if (patch.notes !== undefined) {
-      offers[idx].notes = patch.notes || "";
-    }
+    offers[idx].active = true;
+    offers[idx].enabled = true; // keep legacy field in sync
 
     saveOffers(offers);
     return res.json({ success: true, offer: offers[idx] });
   } catch (err) {
-    console.error("Error in PATCH /api/admin/offers/:code:", err);
-    return res.status(500).json({ error: "Failed to update offer" });
+    console.error("Error in PATCH /api/admin/offers/:code/enable:", err);
+    return res.status(500).json({ error: "Failed to enable offer" });
+  }
+});
+
+// PATCH /api/admin/offers/:code/disable → mark offer as inactive
+app.patch("/api/admin/offers/:code/disable", requireAdminSecret, (req, res) => {
+  try {
+    const codeParam = (req.params.code || "").toUpperCase();
+    if (!codeParam) {
+      return res.status(400).json({ error: "Offer code is required in URL" });
+    }
+
+    const offers = loadOffers();
+    const idx = offers.findIndex((o) => o.code === codeParam);
+
+    if (idx < 0) {
+      return res.status(404).json({ error: "Offer not found" });
+    }
+
+    offers[idx].active = false;
+    offers[idx].enabled = false; // keep legacy field in sync
+
+    saveOffers(offers);
+    return res.json({ success: true, offer: offers[idx] });
+  } catch (err) {
+    console.error("Error in PATCH /api/admin/offers/:code/disable:", err);
+    return res.status(500).json({ error: "Failed to disable offer" });
   }
 });
 
@@ -366,6 +493,96 @@ app.delete("/api/admin/offers/:code", requireAdminSecret, (req, res) => {
   }
 });
 
+// (Optional legacy PATCH route kept for compatibility, but not used by new UI)
+app.patch("/api/admin/offers/:code", requireAdminSecret, (req, res) => {
+  try {
+    const codeParam = (req.params.code || "").toUpperCase();
+    if (!codeParam) {
+      return res.status(400).json({ error: "Offer code is required in URL" });
+    }
+
+    const offers = loadOffers();
+    const idx = offers.findIndex((o) => o.code === codeParam);
+
+    if (idx < 0) {
+      return res.status(404).json({ error: "Offer not found" });
+    }
+
+    const patch = req.body || {};
+    const current = offers[idx];
+
+    if (patch.type) {
+      const t = String(patch.type).toUpperCase();
+      if (["PERCENT", "FIXED"].includes(t)) {
+        current.type = t;
+      }
+    }
+
+    if (patch.amount !== undefined) {
+      const amt = Number(patch.amount);
+      if (amt > 0) {
+        current.amount = amt;
+      }
+    }
+
+    if (patch.active !== undefined) {
+      current.active = !!patch.active;
+      current.enabled = !!patch.active;
+    }
+
+    if (patch.description !== undefined) {
+      current.description = patch.description || "";
+    }
+
+    if (patch.appliesTo) {
+      const appliesTo = patch.appliesTo;
+      if (Array.isArray(appliesTo.plans)) {
+        current.appliesTo.plans = appliesTo.plans
+          .map((p) => String(p || "").trim())
+          .filter(Boolean);
+      }
+      if (Array.isArray(appliesTo.billingTypes)) {
+        current.appliesTo.billingTypes = appliesTo.billingTypes
+          .map((b) => String(b || "").trim())
+          .filter(Boolean);
+      }
+      if (Array.isArray(appliesTo.countries)) {
+        current.appliesTo.countries = appliesTo.countries
+          .map((c) => String(c || "").trim())
+          .filter(Boolean);
+      }
+    }
+
+    if (patch.usageLimit !== undefined) {
+      current.usageLimit =
+        patch.usageLimit === null ? null : Number(patch.usageLimit);
+    }
+
+    if (patch.validity) {
+      current.validity = {
+        start:
+          patch.validity.start !== undefined
+            ? patch.validity.start
+            : current.validity.start,
+        end:
+          patch.validity.end !== undefined
+            ? patch.validity.end
+            : current.validity.end,
+      };
+    }
+
+    saveOffers(offers);
+    return res.json({ success: true, offer: current });
+  } catch (err) {
+    console.error("Error in PATCH /api/admin/offers/:code:", err);
+    return res.status(500).json({ error: "Failed to update offer" });
+  }
+});
+
+// ---------------------------------------------------------------------
+//  OFFER VALIDATION & APPLICATION (USED BY CHECKOUT)
+// ---------------------------------------------------------------------
+
 // Validate if a given couponCode is applicable to a planId
 function validateOfferForPlan(planId, couponCode) {
   if (!couponCode) return { valid: false };
@@ -376,30 +593,44 @@ function validateOfferForPlan(planId, couponCode) {
   const now = new Date();
   const code = String(couponCode).trim().toUpperCase();
 
-  const offer = offers.find((o) => o.code === code);
+  const offer = offers.find((o) => (o.code || "").toUpperCase() === code);
   if (!offer) return { valid: false };
 
-  if (!offer.enabled) return { valid: false };
+  // Active flag (supports both new 'active' and legacy 'enabled')
+  const isActive =
+    offer.active !== undefined
+      ? !!offer.active
+      : offer.enabled !== undefined
+      ? !!offer.enabled
+      : true;
 
-  // Time window check
-  if (offer.startAt) {
-    const start = new Date(offer.startAt);
-    if (now < start) {
-      return { valid: false };
-    }
+  if (!isActive) return { valid: false };
+
+  // Time window check (using validity.start/end or legacy startAt/endAt)
+  let start = null;
+  let end = null;
+
+  if (offer.validity) {
+    if (offer.validity.start) start = new Date(offer.validity.start);
+    if (offer.validity.end) end = new Date(offer.validity.end);
+  } else {
+    if (offer.startAt) start = new Date(offer.startAt);
+    if (offer.endAt) end = new Date(offer.endAt);
   }
-  if (offer.endAt) {
-    const end = new Date(offer.endAt);
-    if (now > end) {
-      return { valid: false };
-    }
-  }
+
+  if (start && now < start) return { valid: false };
+  if (end && now > end) return { valid: false };
 
   // Plan match check
-  if (Array.isArray(offer.applicablePlans) && offer.applicablePlans.length > 0) {
-    if (!offer.applicablePlans.includes(planId)) {
-      return { valid: false };
-    }
+  let plans = [];
+  if (offer.appliesTo && Array.isArray(offer.appliesTo.plans)) {
+    plans = offer.appliesTo.plans;
+  } else if (Array.isArray(offer.applicablePlans)) {
+    plans = offer.applicablePlans;
+  }
+
+  if (plans.length > 0 && !plans.includes(planId)) {
+    return { valid: false };
   }
 
   return {
@@ -558,7 +789,7 @@ app.post("/api/validate-offer", (req, res) => {
 app.post("/create-onetime-order", (req, res) => {
   console.warn(
     "[DEPRECATED] /create-onetime-order was called. " +
-    "This endpoint is retired; use /api/create-enterprise-order instead."
+      "This endpoint is retired; use /api/create-enterprise-order instead."
   );
 
   return res.status(410).json({
@@ -569,27 +800,10 @@ app.post("/create-onetime-order", (req, res) => {
   });
 });
 
-
 // ---------------------------------------------------------------------
 //  ENTERPRISE: CREATE RAZORPAY ORDER (60 / 90 / 120 / consultation)
 // ---------------------------------------------------------------------
 
-/**
- * Expected body from VVAS_enterprise_checkout.html:
- * {
- *   fullName, email,
- *   mobileCountryCode, mobileNumber,
- *   phoneCountryCode, phoneNumber,
- *   waCountryCode, waNumber,
- *   company,
- *   gstStatus, gstNumber,
- *   country, city, state, postalCode,
- *   package: "60" | "90" | "120" | "consultation",
- *   billingType: "subscription" | "monthly" | "yearly" | "one_time",
- *   isConsultation: boolean,
- *   coupon: "CODE" | ""
- * }
- */
 app.post("/api/create-enterprise-order", async (req, res) => {
   try {
     const {
@@ -614,7 +828,6 @@ app.post("/api/create-enterprise-order", async (req, res) => {
       coupon,
     } = req.body || {};
 
-    // Basic validation
     if (!fullName || !email || !pkg) {
       return res.status(400).json({
         success: false,
@@ -622,8 +835,6 @@ app.post("/api/create-enterprise-order", async (req, res) => {
       });
     }
 
-    // You wanted primary mobile mandatory – front-end enforces this.
-    // Backend is slightly forgiving but still can warn if missing.
     if (!mobileCountryCode || !mobileNumber) {
       console.warn("Enterprise order without primary mobile:", {
         fullName,
@@ -631,7 +842,6 @@ app.post("/api/create-enterprise-order", async (req, res) => {
       });
     }
 
-    // If GST = yes, company is mandatory
     if (gstStatus === "yes" && !company) {
       return res.status(400).json({
         success: false,
@@ -639,32 +849,26 @@ app.post("/api/create-enterprise-order", async (req, res) => {
       });
     }
 
-    // Normalise package & billing type
     const pkgValue = pkg === "consultation" ? "consultation" : String(pkg);
     let billingTypeValue = (billingType || "subscription").toLowerCase();
 
-    // "subscription" & "monthly" treated the same
     if (billingTypeValue === "subscription") {
       billingTypeValue = "monthly";
     }
 
-    // Consultation is always one-time
     const consultation = pkgValue === "consultation" || Boolean(isConsultation);
     if (consultation) {
       billingTypeValue = "one_time";
     }
 
-    // Compute base + GST + total
     const { base, gst, total } = computeEnterprisePrice(
       pkgValue,
       billingTypeValue,
       country
     );
 
-    // Build planId for offers engine (for /offers-admin.html)
     const planId = getEnterprisePlanId(pkgValue, billingTypeValue);
 
-    // Validate / apply coupon
     const result = validateOfferForPlan(planId, coupon);
     let offerMeta = null;
     let finalAmount = total;
@@ -691,7 +895,6 @@ app.post("/api/create-enterprise-order", async (req, res) => {
       "_" +
       Math.random().toString(36).slice(2, 7);
 
-    // Create Razorpay order
     const order = await razorpay.orders.create({
       amount: amountInPaise,
       currency: "INR",
@@ -782,16 +985,13 @@ app.post("/api/create-starterpro-order", async (req, res) => {
       });
     }
 
-    // Normalise billing type
     let bt = (billingType || "monthly").toLowerCase();
     if (bt === "subscription") bt = "monthly";
 
-    // Billing rules
     if (bt === "yearly") {
       const yearlyBeforeDiscount = base * 12;
       base = Math.round(yearlyBeforeDiscount * 0.8); // 20% discount
     } else {
-      // monthly / one_time → single month base
       base = base;
     }
 
@@ -799,7 +999,6 @@ app.post("/api/create-starterpro-order", async (req, res) => {
     const gst = isIndia ? Math.round(base * 0.18) : 0;
     const total = base + gst;
 
-    // Offer engine
     const result = validateOfferForPlan(planId, coupon);
     let finalAmount = total;
     let discount = 0;
@@ -899,7 +1098,6 @@ app.post("/verify-payment", async (req, res) => {
       });
     }
 
-    // 1) Verify signature
     const body = razorpay_order_id + "|" + razorpay_payment_id;
 
     const expectedSignature = crypto
@@ -920,7 +1118,6 @@ app.post("/verify-payment", async (req, res) => {
       });
     }
 
-    // 2) Fetch payment details from Razorpay
     let paymentDetails = null;
     try {
       paymentDetails = await razorpay.payments.fetch(razorpay_payment_id);
@@ -928,7 +1125,6 @@ app.post("/verify-payment", async (req, res) => {
       console.error("Error fetching payment from Razorpay:", fetchErr.message);
     }
 
-    // 3) Fetch order details (to get notes: enterprise vs other flows)
     let orderDetails = null;
     try {
       orderDetails = await razorpay.orders.fetch(razorpay_order_id);
@@ -936,9 +1132,9 @@ app.post("/verify-payment", async (req, res) => {
       console.error("Error fetching order from Razorpay:", orderErr.message);
     }
 
-    const orderNotes = (orderDetails && orderDetails.notes) ? orderDetails.notes : {};
+    const orderNotes =
+      orderDetails && orderDetails.notes ? orderDetails.notes : {};
 
-    // 4) Build payload for n8n / logging
     const payloadForN8N = {
       source: "TGP-AI-VIDEO-RAZORPAY",
       verified: true,
@@ -951,14 +1147,13 @@ app.post("/verify-payment", async (req, res) => {
       plan: plan || {},
       meta: {
         ...(meta || {}),
-        razorpay_order_notes: orderNotes,   // 👈 includes product: VVAS, segment: enterprise, planId, etc.
+        razorpay_order_notes: orderNotes,
       },
       payment_details: paymentDetails || {},
       order_details: orderDetails || {},
       verified_at: new Date().toISOString(),
     };
 
-    // 5) Send to n8n webhook (for Google Sheets / email / WhatsApp)
     if (process.env.N8N_PAYMENT_WEBHOOK_URL) {
       try {
         console.log("👀 Calling n8n webhook:", process.env.N8N_PAYMENT_WEBHOOK_URL);
@@ -998,7 +1193,7 @@ app.post("/verify-payment", async (req, res) => {
 app.post("/verify-onetime-payment", (req, res) => {
   console.warn(
     "[DEPRECATED] /verify-onetime-payment was called. " +
-    "This endpoint is retired; one-time verification is now handled by /verify-payment."
+      "This endpoint is retired; one-time verification is now handled by /verify-payment."
   );
 
   return res.status(410).json({
