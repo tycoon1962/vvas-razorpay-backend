@@ -33,6 +33,7 @@ if (process.env.ADMIN_OFFERS_SECRET && process.env.ADMIN_OFFERS_SECRET.trim().le
 }
 
 console.log("[ADMIN] Using ADMIN_OFFERS_SECRET from:", ADMIN_OFFERS_SOURCE);
+console.log("[ADMIN] EXPECTED SECRET VALUE =", JSON.stringify(ADMIN_OFFERS_SECRET));
 
 
 // Where offers will be stored (used by admin panel & public offer validation)
