@@ -49,25 +49,6 @@ function requireAdminSecret(req, res, next) {
 }
 
 // ---------------------------------------------------------------------
-//  ADMIN AUTH MIDDLEWARE (OFFERS)
-// ---------------------------------------------------------------------
-function requireAdminSecret(req, res, next) {
-  const headerSecret = req.headers["x-admin-secret"];
-
-  if (!headerSecret) {
-    console.warn("[ADMIN] Missing x-admin-secret header.");
-    return res.status(401).json({ error: "Unauthorized: missing admin secret" });
-  }
-
-  if (headerSecret !== ADMIN_OFFERS_SECRET) {
-    console.warn("[ADMIN] Invalid x-admin-secret. Source:", ADMIN_OFFERS_SOURCE);
-    return res.status(401).json({ error: "Unauthorized: invalid admin secret" });
-  }
-
-  next();
-}
-
-// ---------------------------------------------------------------------
 //  EXPRESS APP + MIDDLEWARE
 // ---------------------------------------------------------------------
 const app = express();
