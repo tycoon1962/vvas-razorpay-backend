@@ -17,7 +17,23 @@ const axios = require("axios");
 // ---------------------------------------------------------------------
 //  ADMIN SECRET (NO DEFAULT PASSWORD)
 // ---------------------------------------------------------------------
-const ADMIN_OFFERS_SECRET = process.env.ADMIN_OFFERS_SECRET;
+// ---------------------------------------------------------------------
+//  ADMIN SECRET (with explicit debug + safe fallback)
+// ---------------------------------------------------------------------
+let ADMIN_OFFERS_SECRET = null;
+let ADMIN_OFFERS_SOURCE = null;
+
+if (process.env.ADMIN_OFFERS_SECRET && process.env.ADMIN_OFFERS_SECRET.trim().length) {
+  ADMIN_OFFERS_SECRET = process.env.ADMIN_OFFERS_SECRET.trim();
+  ADMIN_OFFERS_SOURCE = "ENV";
+} else {
+  // TEMPORARY FALLBACK so you can definitely log in
+  ADMIN_OFFERS_SECRET = "change-me-in-env";
+  ADMIN_OFFERS_SOURCE = "FALLBACK";
+}
+
+console.log("[ADMIN] Using ADMIN_OFFERS_SECRET from:", ADMIN_OFFERS_SOURCE);
+
 
 // Where offers will be stored (used by admin panel & public offer validation)
 const OFFERS_FILE = path.join(__dirname, "offers.json");
@@ -26,18 +42,16 @@ const OFFERS_FILE = path.join(__dirname, "offers.json");
 //  ADMIN AUTH MIDDLEWARE (OFFERS)
 // ---------------------------------------------------------------------
 function requireAdminSecret(req, res, next) {
-  if (!ADMIN_OFFERS_SECRET) {
-    console.error("[ADMIN] Missing ADMIN_OFFERS_SECRET in environment.");
-    return res.status(500).json({
-      error: "ADMIN_OFFERS_SECRET is not configured on the server.",
-    });
-  }
-
   const headerSecret = req.headers["x-admin-secret"];
 
-  if (!headerSecret || headerSecret !== ADMIN_OFFERS_SECRET) {
-    console.warn("Admin auth failed for /api/admin route.");
-    return res.status(401).json({ error: "Unauthorized" });
+  if (!headerSecret) {
+    console.warn("[ADMIN] Missing x-admin-secret header.");
+    return res.status(401).json({ error: "Unauthorized: missing admin secret" });
+  }
+
+  if (headerSecret !== ADMIN_OFFERS_SECRET) {
+    console.warn("[ADMIN] Invalid x-admin-secret. Source:", ADMIN_OFFERS_SOURCE);
+    return res.status(401).json({ error: "Unauthorized: invalid admin secret" });
   }
 
   next();
