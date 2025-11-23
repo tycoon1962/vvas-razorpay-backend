@@ -30,7 +30,6 @@ const OFFERS_FILE = path.join(__dirname, "offers.json");
 function requireAdminSecret(req, res, next) {
   const headerSecret = req.headers["x-admin-secret"] || "";
 
-  // Debug so we see exactly what the browser is sending
   console.log("[ADMIN] Incoming x-admin-secret =", JSON.stringify(headerSecret));
 
   if (!headerSecret) {
@@ -41,12 +40,13 @@ function requireAdminSecret(req, res, next) {
 
   if (headerSecret !== ADMIN_OFFERS_SECRET) {
     console.warn("[ADMIN] Invalid admin secret.");
-    return res.status(401).json({ error: "Unauthorized: invalid admin secret" });
+    return res
+      .status(401)
+      .json({ error: "Unauthorized: invalid admin secret" });
   }
 
   next();
 }
-
 
 // Where offers will be stored (used by admin panel & public offer validation)
 const OFFERS_FILE = path.join(__dirname, "offers.json");
