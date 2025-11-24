@@ -266,6 +266,99 @@ function getEnterprisePlanId(pkg, billingType) {
   const bt = (billingType || "subscription").toUpperCase(); // SUBSCRIPTION | YEARLY | ONE_TIME
   return `${baseId}_${bt}`;
 }
+// ---------------------------------------------------------------------
+//  CANONICAL PLAN LIST (for Offers Engine + /api/admin/plans)
+// ---------------------------------------------------------------------
+
+const PLANS_CONFIG = [
+  // Starter / Pro – subscriptions (monthly + yearly)
+  {
+    id: "SP_STARTER",
+    label: "Starter – Subscription",
+    billingGroup: "subscription", // covers monthly + yearly
+  },
+  {
+    id: "SP_PRO",
+    label: "Pro – Subscription",
+    billingGroup: "subscription",
+  },
+
+  // Enterprise subscriptions
+  {
+    id: "ENT_60_MONTHLY",
+    label: "Enterprise 60 – Monthly",
+    billingGroup: "monthly",
+  },
+  {
+    id: "ENT_60_YEARLY",
+    label: "Enterprise 60 – Yearly",
+    billingGroup: "yearly",
+  },
+  {
+    id: "ENT_90_MONTHLY",
+    label: "Enterprise 90 – Monthly",
+    billingGroup: "monthly",
+  },
+  {
+    id: "ENT_90_YEARLY",
+    label: "Enterprise 90 – Yearly",
+    billingGroup: "yearly",
+  },
+  {
+    id: "ENT_120_MONTHLY",
+    label: "Enterprise 120 – Monthly",
+    billingGroup: "monthly",
+  },
+  {
+    id: "ENT_120_YEARLY",
+    label: "Enterprise 120 – Yearly",
+    billingGroup: "yearly",
+  },
+
+  // Enterprise consultation (one-time)
+  {
+    id: "ENT_CONSULTATION_ONE_TIME",
+    label: "Enterprise – Consultation Call (One-time)",
+    billingGroup: "one_time",
+  },
+
+  // One-time engine plans
+  {
+    id: "PLAN_CALL",
+    label: "One-time – 60-min Consultation",
+    billingGroup: "one_time",
+  },
+  {
+    id: "PLAN_60",
+    label: "One-time – Up to 60 Videos",
+    billingGroup: "one_time",
+  },
+  {
+    id: "PLAN_90",
+    label: "One-time – Up to 90 Videos",
+    billingGroup: "one_time",
+  },
+  {
+    id: "PLAN_120",
+    label: "One-time – Up to 120 Videos",
+    billingGroup: "one_time",
+  },
+];
+
+// Derive billingTypes for an offer from the selected plans
+function deriveBillingTypesFromPlans(planIds = []) {
+  const set = new Set();
+
+  planIds.forEach((id) => {
+    const p = PLANS_CONFIG.find((pl) => pl.id === id);
+    if (!p || !p.billingGroup) return;
+
+    // we support: "subscription" | "monthly" | "yearly" | "one_time"
+    set.add(p.billingGroup);
+  });
+
+  return Array.from(set);
+}
 
 // ---------------------------------------------------------------------
 //  OFFERS ADMIN – API (MATCHES NEW offers-admin.html)
@@ -292,39 +385,17 @@ function getEnterprisePlanId(pkg, billingType) {
  *   }
  * }
  */
-
 // GET /api/admin/plans  → used by offers-admin.html to show plan checkboxes & filters
-// ---------------------------------------------------------------------
-//  ADMIN: RETURN AVAILABLE PLANS FOR OFFERS PANEL
-// ---------------------------------------------------------------------
+// GET /api/admin/plans  → used by offers-admin.html to show plan checkboxes & filters
+// Returns canonical list with billingGroup metadata
 app.get("/api/admin/plans", requireAdminSecret, (req, res) => {
   try {
-    // This is intentionally simple and cannot throw.
-    // These IDs are what offers.json will use in `applicablePlans`.
-    const plans = [
-      // Starter / Pro subscriptions
-      { id: "SP_STARTER", label: "Starter – Subscription" },
-      { id: "SP_PRO",     label: "Pro – Subscription" },
-
-      // Enterprise subscriptions / billing types
-      { id: "ENT_60_MONTHLY",  label: "Enterprise 60 – Monthly" },
-      { id: "ENT_60_YEARLY",   label: "Enterprise 60 – Yearly" },
-      { id: "ENT_90_MONTHLY",  label: "Enterprise 90 – Monthly" },
-      { id: "ENT_90_YEARLY",   label: "Enterprise 90 – Yearly" },
-      { id: "ENT_120_MONTHLY", label: "Enterprise 120 – Monthly" },
-      { id: "ENT_120_YEARLY",  label: "Enterprise 120 – Yearly" },
-
-      // Enterprise consultation (one-time)
-      { id: "ENT_CONSULTATION_ONE_TIME", label: "Enterprise – Consultation Call (One-time)" },
-
-      // Legacy / one-time engine plans
-      { id: "PLAN_CALL", label: "One-time – 60-min Consultation" },
-      { id: "PLAN_60",   label: "One-time – Up to 60 Videos" },
-      { id: "PLAN_90",   label: "One-time – Up to 90 Videos" },
-      { id: "PLAN_120",  label: "One-time – Up to 120 Videos" }
-    ];
-
-    return res.json(plans);
+    const payload = PLANS_CONFIG.map((p) => ({
+      id: p.id,
+      label: p.label,
+      billingGroup: p.billingGroup || null,
+    }));
+    return res.json(payload);
   } catch (err) {
     console.error("Error in GET /api/admin/plans:", err);
     return res.status(500).json({ error: "Failed to load plans" });
