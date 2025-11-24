@@ -459,17 +459,17 @@ app.post("/api/admin/offers", requireAdminSecret, (req, res) => {
     }
 
     const plans =
-      appliesTo && Array.isArray(appliesTo.plans)
-        ? appliesTo.plans.map((p) => String(p || "").trim()).filter(Boolean)
-        : [];
+  appliesTo && Array.isArray(appliesTo.plans)
+    ? appliesTo.plans.map((p) => String(p || "").trim()).filter(Boolean)
+    : [];
 
-    // Derive billingTypes automatically from selected plans
-    const billingTypes = deriveBillingTypesFromPlans(plans);
+// ⬇️ New: derive billingTypes from selected plans
+const billingTypes = deriveBillingTypesFromPlans(plans);
 
-    const countries =
-      appliesTo && Array.isArray(appliesTo.countries)
-        ? appliesTo.countries.map((c) => String(c || "").trim()).filter(Boolean)
-        : [];
+const countries =
+  appliesTo && Array.isArray(appliesTo.countries)
+    ? appliesTo.countries.map((c) => String(c || "").trim()).filter(Boolean)
+    : [];
 
     if (!plans.length) {
       return res.status(400).json({
@@ -642,23 +642,25 @@ app.patch("/api/admin/offers/:code", requireAdminSecret, (req, res) => {
     }
 
     if (patch.appliesTo) {
-      const appliesTo = patch.appliesTo;
-      if (Array.isArray(appliesTo.plans)) {
-        current.appliesTo.plans = appliesTo.plans
-          .map((p) => String(p || "").trim())
-          .filter(Boolean);
-      }
-      if (Array.isArray(appliesTo.billingTypes)) {
-        current.appliesTo.billingTypes = appliesTo.billingTypes
-          .map((b) => String(b || "").trim())
-          .filter(Boolean);
-      }
-      if (Array.isArray(appliesTo.countries)) {
-        current.appliesTo.countries = appliesTo.countries
-          .map((c) => String(c || "").trim())
-          .filter(Boolean);
-      }
-    }
+  const appliesTo = patch.appliesTo;
+
+  if (Array.isArray(appliesTo.plans)) {
+    current.appliesTo.plans = appliesTo.plans
+      .map((p) => String(p || "").trim())
+      .filter(Boolean);
+
+    // ⬇️ Re-derive billingTypes whenever plans change
+    current.appliesTo.billingTypes = deriveBillingTypesFromPlans(
+      current.appliesTo.plans
+    );
+  }
+
+  if (Array.isArray(appliesTo.countries)) {
+    current.appliesTo.countries = appliesTo.countries
+      .map((c) => String(c || "").trim())
+      .filter(Boolean);
+  }
+}
 
     if (patch.usageLimit !== undefined) {
       current.usageLimit =
