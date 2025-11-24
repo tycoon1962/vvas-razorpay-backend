@@ -185,6 +185,7 @@ const ONE_TIME_PLAN_PRICES = {
   PLAN_120: 55000, // One-Time: Up to 120 Videos
 };
 
+// Base prices (INR, before GST) for Starter/Pro engines (monthly baseline)
 const STARTER_PRO_PLAN_PRICES = {
   SP_STARTER: 15000,
   SP_PRO: 30000,
@@ -263,9 +264,10 @@ function getEnterprisePlanId(pkg, billingType) {
     baseId = "ENT_UNKNOWN";
   }
 
-  const bt = (billingType || "subscription").toUpperCase(); // SUBSCRIPTION | YEARLY | ONE_TIME
+  const bt = (billingType || "subscription").toUpperCase(); // SUBSCRIPTION | YEARLY | ONE_TIME | MONTHLY
   return `${baseId}_${bt}`;
 }
+
 // ---------------------------------------------------------------------
 //  CANONICAL PLAN LIST (for Offers Engine + /api/admin/plans)
 // ---------------------------------------------------------------------
@@ -281,6 +283,18 @@ const PLANS_CONFIG = [
     id: "SP_PRO",
     label: "Pro – Subscription",
     billingGroup: "subscription",
+  },
+
+  // Starter / Pro – one-time projects
+  {
+    id: "SP_STARTER_ONE_TIME",
+    label: "Starter – One-time",
+    billingGroup: "one_time",
+  },
+  {
+    id: "SP_PRO_ONE_TIME",
+    label: "Pro – One-time",
+    billingGroup: "one_time",
   },
 
   // Enterprise subscriptions
@@ -322,7 +336,7 @@ const PLANS_CONFIG = [
     billingGroup: "one_time",
   },
 
-  // One-time engine plans
+  // One-time engine plans (legacy landing / onetime page)
   {
     id: "PLAN_CALL",
     label: "One-time – 60-min Consultation",
@@ -365,16 +379,16 @@ function deriveBillingTypesFromPlans(planIds = []) {
 // ---------------------------------------------------------------------
 
 /**
- * New canonical shape of an offer in offers.json:
+ * Canonical shape of an offer in offers.json:
  * {
  *   code: "STARTER20",
  *   type: "PERCENT" | "FIXED",
  *   amount: 20,
- *   description: "Short note",
+ *   description: "Internal note (not shown to customer)",
  *   active: true,
  *   appliesTo: {
  *     plans: ["SP_STARTER", "SP_PRO", "ENT_60_MONTHLY", ...],
- *     billingTypes: ["monthly", "yearly", "one_time"],
+ *     billingTypes: ["subscription", "one_time"],
  *     countries: ["India", "United States"]
  *   },
  *   usageLimit: 50, // optional
@@ -385,7 +399,7 @@ function deriveBillingTypesFromPlans(planIds = []) {
  *   }
  * }
  */
-// GET /api/admin/plans  → used by offers-admin.html to show plan checkboxes & filters
+
 // GET /api/admin/plans  → used by offers-admin.html to show plan checkboxes & filters
 // Returns canonical list with billingGroup metadata
 app.get("/api/admin/plans", requireAdminSecret, (req, res) => {
@@ -401,7 +415,6 @@ app.get("/api/admin/plans", requireAdminSecret, (req, res) => {
     return res.status(500).json({ error: "Failed to load plans" });
   }
 });
-
 
 // GET /api/admin/offers  → list all offers
 app.get("/api/admin/offers", requireAdminSecret, (req, res) => {
@@ -449,10 +462,10 @@ app.post("/api/admin/offers", requireAdminSecret, (req, res) => {
       appliesTo && Array.isArray(appliesTo.plans)
         ? appliesTo.plans.map((p) => String(p || "").trim()).filter(Boolean)
         : [];
-    const billingTypes =
-      appliesTo && Array.isArray(appliesTo.billingTypes)
-        ? appliesTo.billingTypes.map((b) => String(b || "").trim()).filter(Boolean)
-        : [];
+
+    // Derive billingTypes automatically from selected plans
+    const billingTypes = deriveBillingTypesFromPlans(plans);
+
     const countries =
       appliesTo && Array.isArray(appliesTo.countries)
         ? appliesTo.countries.map((c) => String(c || "").trim()).filter(Boolean)
@@ -1069,9 +1082,9 @@ app.post("/api/create-starterpro-order", async (req, res) => {
     }
 
     const planNormalized = plan === "pro" ? "pro" : "starter";
-    const planId = planNormalized === "starter" ? "SP_STARTER" : "SP_PRO";
+    const basePlanId = planNormalized === "starter" ? "SP_STARTER" : "SP_PRO";
 
-    let base = STARTER_PRO_PLAN_PRICES[planId];
+    let base = STARTER_PRO_PLAN_PRICES[basePlanId];
     if (!base) {
       return res.status(400).json({
         success: false,
@@ -1082,11 +1095,16 @@ app.post("/api/create-starterpro-order", async (req, res) => {
     let bt = (billingType || "monthly").toLowerCase();
     if (bt === "subscription") bt = "monthly";
 
+    // Monthly + Yearly share the same planId (subscription offers).
+    // One-time uses a separate planId so coupons can be restricted.
+    let planId = basePlanId;
+    if (bt === "one_time") {
+      planId = basePlanId + "_ONE_TIME";
+    }
+
     if (bt === "yearly") {
       const yearlyBeforeDiscount = base * 12;
       base = Math.round(yearlyBeforeDiscount * 0.8); // 20% discount
-    } else {
-      base = base;
     }
 
     const isIndia = (country || "").trim().toLowerCase() === "india";
