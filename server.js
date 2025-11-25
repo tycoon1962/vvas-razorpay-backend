@@ -17,7 +17,7 @@ const axios = require("axios");
 // ---------------------------------------------------------------------
 //  ADMIN SECRET (TEMPORARY HARD-CODED FOR DEBUG)
 // ---------------------------------------------------------------------
-const ADMIN_OFFERS_SECRET = "VVAS_Offers_Admin_2025!";
+const ADMIN_OFFERS_SECRET = process.env.ADMIN_OFFERS_SECRET;
 
 console.log("[ADMIN] EXPECTED SECRET VALUE =", JSON.stringify(ADMIN_OFFERS_SECRET));
 
