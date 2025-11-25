@@ -273,7 +273,7 @@ function getEnterprisePlanId(pkg, billingType) {
 // ---------------------------------------------------------------------
 
 const PLANS_CONFIG = [
-  // Starter / Pro – subscriptions (monthly + yearly)
+  // Starter / Pro – subscriptions (these are your existing checkout plans)
   {
     id: "SP_STARTER",
     label: "Starter – Subscription",
@@ -283,18 +283,6 @@ const PLANS_CONFIG = [
     id: "SP_PRO",
     label: "Pro – Subscription",
     billingGroup: "subscription",
-  },
-
-  // Starter / Pro – one-time projects
-  {
-    id: "SP_STARTER_ONE_TIME",
-    label: "Starter – One-time",
-    billingGroup: "one_time",
-  },
-  {
-    id: "SP_PRO_ONE_TIME",
-    label: "Pro – One-time",
-    billingGroup: "one_time",
   },
 
   // Enterprise subscriptions
@@ -329,32 +317,29 @@ const PLANS_CONFIG = [
     billingGroup: "yearly",
   },
 
-  // Enterprise consultation (one-time)
+  // Consultation – ONLY one canonical consultation plan
   {
     id: "ENT_CONSULTATION_ONE_TIME",
-    label: "Enterprise – Consultation Call (One-time)",
+    label: "Consultation – 60-min (One-time)",
     billingGroup: "one_time",
   },
 
-  // One-time engine plans (legacy landing / onetime page)
-  {
-    id: "PLAN_CALL",
-    label: "One-time – 60-min Consultation",
-    billingGroup: "one_time",
-  },
+  // Optional legacy one-time video SKUs
+  // Keep these only if you still actively use the old “One-time X videos” engine.
+  // If not, you can safely comment them out to hide them from the admin UI.
   {
     id: "PLAN_60",
-    label: "One-time – Up to 60 Videos",
+    label: "One-time – Up to 60 Videos (Legacy)",
     billingGroup: "one_time",
   },
   {
     id: "PLAN_90",
-    label: "One-time – Up to 90 Videos",
+    label: "One-time – Up to 90 Videos (Legacy)",
     billingGroup: "one_time",
   },
   {
     id: "PLAN_120",
-    label: "One-time – Up to 120 Videos",
+    label: "One-time – Up to 120 Videos (Legacy)",
     billingGroup: "one_time",
   },
 ];
