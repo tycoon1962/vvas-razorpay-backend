@@ -177,7 +177,7 @@ function saveOffers(offersArray) {
 // ---------------------------------------------------------------------
 
 // Base prices (INR, before GST) for ONE-TIME plans.
-// Must match the planId values used in frontend + offers-admin.
+// These are used by the old one-time engine /api/validate-offer
 const ONE_TIME_PLAN_PRICES = {
   PLAN_CALL: 5000, // 60-Minute Consultation
   PLAN_60: 40000,  // One-Time: Up to 60 Videos
@@ -226,7 +226,7 @@ function computeEnterprisePrice(pkg, billingType, country) {
   }
 
   let base = baseMonthly;
-  const bt = (billingType || "subscription").toLowerCase();
+  const bt = (billingType || "monthly").toLowerCase();
 
   if (pkg === "consultation") {
     // Always one-time fee
@@ -236,7 +236,7 @@ function computeEnterprisePrice(pkg, billingType, country) {
       const yearlyBeforeDiscount = baseMonthly * 12;
       base = Math.round(yearlyBeforeDiscount * 0.8); // 20% off yearly
     } else {
-      // "subscription" (monthly), "monthly", or "one_time" → 1x monthly amount
+      // "monthly" or "one_time" → 1x monthly amount
       base = baseMonthly;
     }
   }
@@ -248,112 +248,94 @@ function computeEnterprisePrice(pkg, billingType, country) {
   return { base, gst, total };
 }
 
-// Build a planId for offers.json so coupons can target
-// ENT_60_MONTHLY, ENT_60_YEARLY, ENT_60_ONE_TIME, ENT_CONSULTATION_ONE_TIME, etc.
+// Build a planId for offers.json so coupons can target clean plan IDs.
+// We no longer encode billing type in the ID – billing is a separate dimension.
 function getEnterprisePlanId(pkg, billingType) {
-  let baseId;
-  if (pkg === "consultation") {
-    baseId = "ENT_CONSULTATION";
-  } else if (pkg === "60") {
-    baseId = "ENT_60";
-  } else if (pkg === "90") {
-    baseId = "ENT_90";
-  } else if (pkg === "120") {
-    baseId = "ENT_120";
-  } else {
-    baseId = "ENT_UNKNOWN";
-  }
-
-  const bt = (billingType || "subscription").toUpperCase(); // SUBSCRIPTION | YEARLY | ONE_TIME | MONTHLY
-  return `${baseId}_${bt}`;
+  if (pkg === "consultation") return "ENT_CONSULTATION";
+  if (pkg === "60") return "ENT_60";
+  if (pkg === "90") return "ENT_90";
+  if (pkg === "120") return "ENT_120";
+  return "ENT_UNKNOWN";
 }
 
 // ---------------------------------------------------------------------
 //  CANONICAL PLAN LIST (for Offers Engine + /api/admin/plans)
 // ---------------------------------------------------------------------
 
+// Logical plans in the system:
+//  - Starter
+//  - Pro
+//  - Enterprise 60
+//  - Enterprise 90
+//  - Enterprise 120
+//  - Consultation (One-time)
 const PLANS_CONFIG = [
-  // Starter / Pro – subscriptions (these are your existing checkout plans)
+  // Starter / Pro – subscriptions
   {
     id: "SP_STARTER",
-    label: "Starter – Subscription",
-    billingGroup: "subscription", // covers monthly + yearly
+    label: "Starter",
+    allowedBilling: ["monthly", "yearly"],
+    isConsultation: false,
   },
   {
     id: "SP_PRO",
-    label: "Pro – Subscription",
-    billingGroup: "subscription",
+    label: "Pro",
+    allowedBilling: ["monthly", "yearly"],
+    isConsultation: false,
   },
 
   // Enterprise subscriptions
   {
-    id: "ENT_60_MONTHLY",
-    label: "Enterprise 60 – Monthly",
-    billingGroup: "monthly",
+    id: "ENT_60",
+    label: "Enterprise 60",
+    allowedBilling: ["monthly", "yearly"],
+    isConsultation: false,
   },
   {
-    id: "ENT_60_YEARLY",
-    label: "Enterprise 60 – Yearly",
-    billingGroup: "yearly",
+    id: "ENT_90",
+    label: "Enterprise 90",
+    allowedBilling: ["monthly", "yearly"],
+    isConsultation: false,
   },
   {
-    id: "ENT_90_MONTHLY",
-    label: "Enterprise 90 – Monthly",
-    billingGroup: "monthly",
-  },
-  {
-    id: "ENT_90_YEARLY",
-    label: "Enterprise 90 – Yearly",
-    billingGroup: "yearly",
-  },
-  {
-    id: "ENT_120_MONTHLY",
-    label: "Enterprise 120 – Monthly",
-    billingGroup: "monthly",
-  },
-  {
-    id: "ENT_120_YEARLY",
-    label: "Enterprise 120 – Yearly",
-    billingGroup: "yearly",
+    id: "ENT_120",
+    label: "Enterprise 120",
+    allowedBilling: ["monthly", "yearly"],
+    isConsultation: false,
   },
 
-  // Consultation – ONLY one canonical consultation plan
+  // Consultation – ONLY one canonical consultation plan (one-time only)
   {
-    id: "ENT_CONSULTATION_ONE_TIME",
-    label: "Consultation – 60-min (One-time)",
-    billingGroup: "one_time",
-  },
-
-  // Optional legacy one-time video SKUs
-  // Keep these only if you still actively use the old “One-time X videos” engine.
-  // If not, you can safely comment them out to hide them from the admin UI.
-  {
-    id: "PLAN_60",
-    label: "One-time – Up to 60 Videos (Legacy)",
-    billingGroup: "one_time",
-  },
-  {
-    id: "PLAN_90",
-    label: "One-time – Up to 90 Videos (Legacy)",
-    billingGroup: "one_time",
-  },
-  {
-    id: "PLAN_120",
-    label: "One-time – Up to 120 Videos (Legacy)",
-    billingGroup: "one_time",
+    id: "ENT_CONSULTATION",
+    label: "Consultation (One-time)",
+    allowedBilling: ["one_time"],
+    isConsultation: true,
   },
 ];
 
 // Derive billingTypes for an offer from the selected plans
+// Business rule:
+//  - If Consultation is included with ANY other plan → force ["one_time"] for the whole offer.
+//  - Otherwise → union of allowedBilling of all selected plans.
 function deriveBillingTypesFromPlans(planIds = []) {
+  const uniqueIds = Array.from(new Set(planIds || []));
+
+  const selectedPlans = uniqueIds
+    .map((id) => PLANS_CONFIG.find((p) => p.id === id))
+    .filter(Boolean);
+
+  if (!selectedPlans.length) return [];
+
+  const hasConsultation = selectedPlans.some((p) => p.isConsultation);
+
+  if (hasConsultation) {
+    // Your strict rule: if Consultation participates, everything is one-time only.
+    return ["one_time"];
+  }
+
   const set = new Set();
-
-  planIds.forEach((id) => {
-    const p = PLANS_CONFIG.find((pl) => pl.id === id);
-    if (!p || !p.billingGroup) return;
-
-    // we support: "subscription" | "monthly" | "yearly" | "one_time"
-    set.add(p.billingGroup);
+  selectedPlans.forEach((p) => {
+    (p.allowedBilling || []).forEach((bt) => set.add(bt));
   });
 
   return Array.from(set);
@@ -372,8 +354,8 @@ function deriveBillingTypesFromPlans(planIds = []) {
  *   description: "Internal note (not shown to customer)",
  *   active: true,
  *   appliesTo: {
- *     plans: ["SP_STARTER", "SP_PRO", "ENT_60_MONTHLY", ...],
- *     billingTypes: ["subscription", "one_time"],
+ *     plans: ["SP_STARTER", "ENT_60", ...],
+ *     billingTypes: ["monthly", "yearly", "one_time"],
  *     countries: ["India", "United States"]
  *   },
  *   usageLimit: 50, // optional
@@ -386,13 +368,14 @@ function deriveBillingTypesFromPlans(planIds = []) {
  */
 
 // GET /api/admin/plans  → used by offers-admin.html to show plan checkboxes & filters
-// Returns canonical list with billingGroup metadata
+// Returns canonical list with plan metadata
 app.get("/api/admin/plans", requireAdminSecret, (req, res) => {
   try {
     const payload = PLANS_CONFIG.map((p) => ({
       id: p.id,
       label: p.label,
-      billingGroup: p.billingGroup || null,
+      allowedBilling: p.allowedBilling || [],
+      isConsultation: !!p.isConsultation,
     }));
     return res.json(payload);
   } catch (err) {
@@ -444,17 +427,17 @@ app.post("/api/admin/offers", requireAdminSecret, (req, res) => {
     }
 
     const plans =
-  appliesTo && Array.isArray(appliesTo.plans)
-    ? appliesTo.plans.map((p) => String(p || "").trim()).filter(Boolean)
-    : [];
+      appliesTo && Array.isArray(appliesTo.plans)
+        ? appliesTo.plans.map((p) => String(p || "").trim()).filter(Boolean)
+        : [];
 
-// ⬇️ New: derive billingTypes from selected plans
-const billingTypes = deriveBillingTypesFromPlans(plans);
+    // Derive billingTypes from selected plans based on business rules
+    const billingTypes = deriveBillingTypesFromPlans(plans);
 
-const countries =
-  appliesTo && Array.isArray(appliesTo.countries)
-    ? appliesTo.countries.map((c) => String(c || "").trim()).filter(Boolean)
-    : [];
+    const countries =
+      appliesTo && Array.isArray(appliesTo.countries)
+        ? appliesTo.countries.map((c) => String(c || "").trim()).filter(Boolean)
+        : [];
 
     if (!plans.length) {
       return res.status(400).json({
@@ -627,25 +610,25 @@ app.patch("/api/admin/offers/:code", requireAdminSecret, (req, res) => {
     }
 
     if (patch.appliesTo) {
-  const appliesTo = patch.appliesTo;
+      const appliesTo = patch.appliesTo;
 
-  if (Array.isArray(appliesTo.plans)) {
-    current.appliesTo.plans = appliesTo.plans
-      .map((p) => String(p || "").trim())
-      .filter(Boolean);
+      if (Array.isArray(appliesTo.plans)) {
+        current.appliesTo.plans = appliesTo.plans
+          .map((p) => String(p || "").trim())
+          .filter(Boolean);
 
-    // ⬇️ Re-derive billingTypes whenever plans change
-    current.appliesTo.billingTypes = deriveBillingTypesFromPlans(
-      current.appliesTo.plans
-    );
-  }
+        // Re-derive billingTypes whenever plans change
+        current.appliesTo.billingTypes = deriveBillingTypesFromPlans(
+          current.appliesTo.plans
+        );
+      }
 
-  if (Array.isArray(appliesTo.countries)) {
-    current.appliesTo.countries = appliesTo.countries
-      .map((c) => String(c || "").trim())
-      .filter(Boolean);
-  }
-}
+      if (Array.isArray(appliesTo.countries)) {
+        current.appliesTo.countries = appliesTo.countries
+          .map((c) => String(c || "").trim())
+          .filter(Boolean);
+      }
+    }
 
     if (patch.usageLimit !== undefined) {
       current.usageLimit =
@@ -944,7 +927,7 @@ app.post("/api/create-enterprise-order", async (req, res) => {
     }
 
     const pkgValue = pkg === "consultation" ? "consultation" : String(pkg);
-    let billingTypeValue = (billingType || "subscription").toLowerCase();
+    let billingTypeValue = (billingType || "monthly").toLowerCase();
 
     if (billingTypeValue === "subscription") {
       billingTypeValue = "monthly";
@@ -1082,12 +1065,7 @@ app.post("/api/create-starterpro-order", async (req, res) => {
     let bt = (billingType || "monthly").toLowerCase();
     if (bt === "subscription") bt = "monthly";
 
-    // Monthly + Yearly share the same planId (subscription offers).
-    // One-time uses a separate planId so coupons can be restricted.
-    let planId = basePlanId;
-    if (bt === "one_time") {
-      planId = basePlanId + "_ONE_TIME";
-    }
+    const planId = basePlanId; // monthly & yearly share the same planId for coupons
 
     if (bt === "yearly") {
       const yearlyBeforeDiscount = base * 12;
