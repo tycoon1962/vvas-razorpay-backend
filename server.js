@@ -58,6 +58,35 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cors());
 
 // ---------------------------------------------------------------------
+// THANK-YOU SIGNATURE HELPERS (v1)
+// ---------------------------------------------------------------------
+const crypto = require("crypto");
+
+const THANKYOU_SIG_SECRET = process.env.THANKYOU_SIG_SECRET;
+
+function base64url(buffer) {
+  return buffer
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+function signThankYouV1({ order_id, payment_id, ts }) {
+  if (!THANKYOU_SIG_SECRET) {
+    throw new Error("THANKYOU_SIG_SECRET not configured");
+  }
+
+  const canonical = `v1|order_id=${order_id}|payment_id=${payment_id}|ts=${ts}`;
+  const mac = crypto
+    .createHmac("sha256", THANKYOU_SIG_SECRET)
+    .update(canonical)
+    .digest();
+
+  return base64url(mac);
+}
+
+// ---------------------------------------------------------------------
 //  RAZORPAY INSTANCE
 // ---------------------------------------------------------------------
 const razorpay = new Razorpay({
