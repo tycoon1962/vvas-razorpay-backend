@@ -15,7 +15,7 @@ const fetch = require("node-fetch");
 const axios = require("axios");
 
 // ---------------------------------------------------------------------
-//  ADMIN SECRET (TEMPORARY HARD-CODED FOR DEBUG)
+//  ADMIN SECRET
 // ---------------------------------------------------------------------
 const ADMIN_OFFERS_SECRET = process.env.ADMIN_OFFERS_SECRET;
 
@@ -58,10 +58,8 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cors());
 
 // ---------------------------------------------------------------------
-// THANK-YOU SIGNATURE HELPERS (v1)
+//  THANK-YOU SIGNATURE HELPERS (v1)
 // ---------------------------------------------------------------------
-const crypto = require("crypto");
-
 const THANKYOU_SIG_SECRET = process.env.THANKYOU_SIG_SECRET;
 
 function base64url(buffer) {
@@ -86,6 +84,46 @@ function signThankYouV1({ order_id, payment_id, ts }) {
   return base64url(mac);
 }
 
+function timingSafeEqualStr(a, b) {
+  const aa = Buffer.from(String(a || ""));
+  const bb = Buffer.from(String(b || ""));
+  if (aa.length !== bb.length) return false;
+  return crypto.timingSafeEqual(aa, bb);
+}
+
+// ---------------------------------------------------------------------
+//  THANK-YOU CONTRACT STORE (v1) — in-memory with TTL
+//  (v1 rollout: fast + simple; swap to DB later if needed)
+// ---------------------------------------------------------------------
+const THANKYOU_CONTRACT_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const thankYouContractStore = new Map(); // key -> { storedAt, contract }
+
+function makeThankYouKey({ order_id, payment_id }) {
+  return `v1|order_id=${order_id}|payment_id=${payment_id}`;
+}
+
+function purgeThankYouContracts() {
+  const now = Date.now();
+  for (const [k, v] of thankYouContractStore.entries()) {
+    if (!v?.storedAt || now - v.storedAt > THANKYOU_CONTRACT_TTL_MS) {
+      thankYouContractStore.delete(k);
+    }
+  }
+}
+
+function storeThankYouContract({ order_id, payment_id, contract }) {
+  purgeThankYouContracts();
+  const key = makeThankYouKey({ order_id, payment_id });
+  thankYouContractStore.set(key, { storedAt: Date.now(), contract });
+}
+
+function getThankYouContract({ order_id, payment_id }) {
+  purgeThankYouContracts();
+  const key = makeThankYouKey({ order_id, payment_id });
+  const found = thankYouContractStore.get(key);
+  return found?.contract || null;
+}
+
 // ---------------------------------------------------------------------
 //  RAZORPAY INSTANCE
 // ---------------------------------------------------------------------
@@ -99,7 +137,6 @@ const N8N_ONETIME_WEBHOOK_URL = process.env.N8N_ONETIME_WEBHOOK_URL;
 // ---------------------------------------------------------------------
 //  OFFERS STORAGE HELPERS
 // ---------------------------------------------------------------------
-
 function loadOffers() {
   try {
     if (!fs.existsSync(OFFERS_FILE)) return [];
@@ -108,11 +145,9 @@ function loadOffers() {
     const parsed = JSON.parse(raw);
     const arr = Array.isArray(parsed) ? parsed : [];
 
-    // Normalize to new schema (active/appliesTo/validity/etc.) as far as possible
     return arr.map((o) => {
       const offer = { ...o };
 
-      // Backwards compat: enabled → active
       if (offer.active === undefined && typeof offer.enabled === "boolean") {
         offer.active = offer.enabled;
       }
@@ -120,7 +155,6 @@ function loadOffers() {
         offer.active = true;
       }
 
-      // Backwards compat: startAt / endAt → validity.{start,end}
       if (!offer.validity) {
         offer.validity = {
           start: offer.startAt || null,
@@ -128,7 +162,6 @@ function loadOffers() {
         };
       }
 
-      // Backwards compat: applicablePlans → appliesTo.plans
       if (!offer.appliesTo) {
         offer.appliesTo = {
           plans: Array.isArray(offer.applicablePlans)
@@ -140,44 +173,25 @@ function loadOffers() {
           countries: Array.isArray(offer.countries) ? offer.countries : [],
         };
       } else {
-        if (!Array.isArray(offer.appliesTo.plans)) {
-          offer.appliesTo.plans = [];
-        }
-        if (!Array.isArray(offer.appliesTo.billingTypes)) {
-          offer.appliesTo.billingTypes = [];
-        }
-        if (!Array.isArray(offer.appliesTo.countries)) {
-          offer.appliesTo.countries = [];
-        }
+        if (!Array.isArray(offer.appliesTo.plans)) offer.appliesTo.plans = [];
+        if (!Array.isArray(offer.appliesTo.billingTypes)) offer.appliesTo.billingTypes = [];
+        if (!Array.isArray(offer.appliesTo.countries)) offer.appliesTo.countries = [];
       }
 
-      // Normalize type
-      if (offer.type) {
-        offer.type = String(offer.type).toUpperCase();
-      }
+      if (offer.type) offer.type = String(offer.type).toUpperCase();
 
-      // Ensure amount is numeric
-      if (offer.amount !== undefined) {
-        offer.amount = Number(offer.amount);
-      }
+      if (offer.amount !== undefined) offer.amount = Number(offer.amount);
 
-      // Defaults for usage tracking
       if (offer.usageLimit !== null && offer.usageLimit !== undefined) {
         offer.usageLimit = Number(offer.usageLimit);
       } else {
         offer.usageLimit = null;
       }
 
-      if (offer.used === undefined) {
-        offer.used = 0;
-      } else {
-        offer.used = Number(offer.used) || 0;
-      }
+      if (offer.used === undefined) offer.used = 0;
+      else offer.used = Number(offer.used) || 0;
 
-      // Description fallback from notes
-      if (!offer.description && offer.notes) {
-        offer.description = offer.notes;
-      }
+      if (!offer.description && offer.notes) offer.description = offer.notes;
 
       return offer;
     });
@@ -204,68 +218,52 @@ function saveOffers(offersArray) {
 // ---------------------------------------------------------------------
 //  ONE-TIME PLAN PRICING + OFFER LOGIC
 // ---------------------------------------------------------------------
-
-// Base prices (INR, before GST) for ONE-TIME plans.
-// These are used by the old one-time engine /api/validate-offer
 const ONE_TIME_PLAN_PRICES = {
-  PLAN_CALL: 5000, // 60-Minute Consultation
-  PLAN_60: 40000,  // One-Time: Up to 60 Videos
-  PLAN_90: 50000,  // One-Time: Up to 90 Videos
-  PLAN_120: 55000, // One-Time: Up to 120 Videos
+  PLAN_CALL: 5000,
+  PLAN_60: 40000,
+  PLAN_90: 50000,
+  PLAN_120: 55000,
 };
 
-// Base prices (INR, before GST) for Starter/Pro engines (monthly baseline)
 const STARTER_PRO_PLAN_PRICES = {
   SP_STARTER: 15000,
   SP_PRO: 30000,
 };
 
-// Compute base + GST + total for a one-time plan
 function computeOneTimePrice(planId, customBasePrice) {
   let base = ONE_TIME_PLAN_PRICES[planId] ?? 0;
-
-  // Allow override from frontend for custom deals
   if (typeof customBasePrice === "number" && customBasePrice > 0) {
     base = customBasePrice;
   }
-
-  const gst = Math.round(base * 0.18); // 18% GST
+  const gst = Math.round(base * 0.18);
   const total = base + gst;
-
   return { base, gst, total };
 }
 
 // ---------------------------------------------------------------------
 //  ENTERPRISE PLAN PRICING HELPERS
 // ---------------------------------------------------------------------
-
-// Base monthly prices (INR, before GST) for ENTERPRISE plans.
 const ENTERPRISE_BASE_PRICES = {
-  "60": 40000,        // 60 videos / month
-  "90": 50000,        // 90 videos / month
-  "120": 55000,       // 120+ videos / month
-  consultation: 5000, // Paid consultation call
+  "60": 40000,
+  "90": 50000,
+  "120": 55000,
+  consultation: 5000,
 };
 
-// Compute enterprise base + GST + total
 function computeEnterprisePrice(pkg, billingType, country) {
   const baseMonthly = ENTERPRISE_BASE_PRICES[pkg];
-  if (!baseMonthly) {
-    throw new Error("Invalid enterprise package");
-  }
+  if (!baseMonthly) throw new Error("Invalid enterprise package");
 
   let base = baseMonthly;
   const bt = (billingType || "monthly").toLowerCase();
 
   if (pkg === "consultation") {
-    // Always one-time fee
     base = ENTERPRISE_BASE_PRICES.consultation;
   } else {
     if (bt === "yearly") {
       const yearlyBeforeDiscount = baseMonthly * 12;
-      base = Math.round(yearlyBeforeDiscount * 0.8); // 20% off yearly
+      base = Math.round(yearlyBeforeDiscount * 0.8);
     } else {
-      // "monthly" or "one_time" → 1x monthly amount
       base = baseMonthly;
     }
   }
@@ -277,8 +275,6 @@ function computeEnterprisePrice(pkg, billingType, country) {
   return { base, gst, total };
 }
 
-// Build a planId for offers.json so coupons can target clean plan IDs.
-// We no longer encode billing type in the ID – billing is a separate dimension.
 function getEnterprisePlanId(pkg, billingType) {
   if (pkg === "consultation") return "ENT_CONSULTATION";
   if (pkg === "60") return "ENT_60";
@@ -290,65 +286,17 @@ function getEnterprisePlanId(pkg, billingType) {
 // ---------------------------------------------------------------------
 //  CANONICAL PLAN LIST (for Offers Engine + /api/admin/plans)
 // ---------------------------------------------------------------------
-
-// Logical plans in the system:
-//  - Starter
-//  - Pro
-//  - Enterprise 60
-//  - Enterprise 90
-//  - Enterprise 120
-//  - Consultation (One-time)
 const PLANS_CONFIG = [
-  // Starter / Pro – subscriptions
-  {
-    id: "SP_STARTER",
-    label: "Starter",
-    allowedBilling: ["monthly", "yearly"],
-    isConsultation: false,
-  },
-  {
-    id: "SP_PRO",
-    label: "Pro",
-    allowedBilling: ["monthly", "yearly"],
-    isConsultation: false,
-  },
-
-  // Enterprise subscriptions
-  {
-    id: "ENT_60",
-    label: "Enterprise 60",
-    allowedBilling: ["monthly", "yearly"],
-    isConsultation: false,
-  },
-  {
-    id: "ENT_90",
-    label: "Enterprise 90",
-    allowedBilling: ["monthly", "yearly"],
-    isConsultation: false,
-  },
-  {
-    id: "ENT_120",
-    label: "Enterprise 120",
-    allowedBilling: ["monthly", "yearly"],
-    isConsultation: false,
-  },
-
-  // Consultation – ONLY one canonical consultation plan (one-time only)
-  {
-    id: "ENT_CONSULTATION",
-    label: "Consultation (One-time)",
-    allowedBilling: ["one_time"],
-    isConsultation: true,
-  },
+  { id: "SP_STARTER", label: "Starter", allowedBilling: ["monthly", "yearly"], isConsultation: false },
+  { id: "SP_PRO", label: "Pro", allowedBilling: ["monthly", "yearly"], isConsultation: false },
+  { id: "ENT_60", label: "Enterprise 60", allowedBilling: ["monthly", "yearly"], isConsultation: false },
+  { id: "ENT_90", label: "Enterprise 90", allowedBilling: ["monthly", "yearly"], isConsultation: false },
+  { id: "ENT_120", label: "Enterprise 120", allowedBilling: ["monthly", "yearly"], isConsultation: false },
+  { id: "ENT_CONSULTATION", label: "Consultation (One-time)", allowedBilling: ["one_time"], isConsultation: true },
 ];
 
-// Derive billingTypes for an offer from the selected plans
-// Business rule:
-//  - If Consultation is included with ANY other plan → force ["one_time"] for the whole offer.
-//  - Otherwise → union of allowedBilling of all selected plans.
 function deriveBillingTypesFromPlans(planIds = []) {
   const uniqueIds = Array.from(new Set(planIds || []));
-
   const selectedPlans = uniqueIds
     .map((id) => PLANS_CONFIG.find((p) => p.id === id))
     .filter(Boolean);
@@ -356,48 +304,16 @@ function deriveBillingTypesFromPlans(planIds = []) {
   if (!selectedPlans.length) return [];
 
   const hasConsultation = selectedPlans.some((p) => p.isConsultation);
-
-  if (hasConsultation) {
-    // Your strict rule: if Consultation participates, everything is one-time only.
-    return ["one_time"];
-  }
+  if (hasConsultation) return ["one_time"];
 
   const set = new Set();
-  selectedPlans.forEach((p) => {
-    (p.allowedBilling || []).forEach((bt) => set.add(bt));
-  });
-
+  selectedPlans.forEach((p) => (p.allowedBilling || []).forEach((bt) => set.add(bt)));
   return Array.from(set);
 }
 
 // ---------------------------------------------------------------------
-//  OFFERS ADMIN – API (MATCHES NEW offers-admin.html)
+//  OFFERS ADMIN – API
 // ---------------------------------------------------------------------
-
-/**
- * Canonical shape of an offer in offers.json:
- * {
- *   code: "STARTER20",
- *   type: "PERCENT" | "FIXED",
- *   amount: 20,
- *   description: "Internal note (not shown to customer)",
- *   active: true,
- *   appliesTo: {
- *     plans: ["SP_STARTER", "ENT_60", ...],
- *     billingTypes: ["monthly", "yearly", "one_time"],
- *     countries: ["India", "United States"]
- *   },
- *   usageLimit: 50, // optional
- *   used: 0,        // optional
- *   validity: {
- *     start: "2025-11-20",
- *     end: "2025-12-01"
- *   }
- * }
- */
-
-// GET /api/admin/plans  → used by offers-admin.html to show plan checkboxes & filters
-// Returns canonical list with plan metadata
 app.get("/api/admin/plans", requireAdminSecret, (req, res) => {
   try {
     const payload = PLANS_CONFIG.map((p) => ({
@@ -413,7 +329,6 @@ app.get("/api/admin/plans", requireAdminSecret, (req, res) => {
   }
 });
 
-// GET /api/admin/offers  → list all offers
 app.get("/api/admin/offers", requireAdminSecret, (req, res) => {
   try {
     const offers = loadOffers();
@@ -424,43 +339,26 @@ app.get("/api/admin/offers", requireAdminSecret, (req, res) => {
   }
 });
 
-// POST /api/admin/offers → create or upsert an offer (new schema)
 app.post("/api/admin/offers", requireAdminSecret, (req, res) => {
   try {
-    const {
-      code,
-      type,
-      amount,
-      description,
-      active,
-      appliesTo,
-      usageLimit,
-      validity,
-    } = req.body || {};
+    const { code, type, amount, description, active, appliesTo, usageLimit, validity } = req.body || {};
 
     if (!code || !type || !amount) {
-      return res.status(400).json({
-        error: "code, type and amount are required",
-      });
+      return res.status(400).json({ error: "code, type and amount are required" });
     }
 
     const normalizedCode = String(code).trim().toUpperCase();
-    const normalizedType = String(type).trim().toUpperCase(); // PERCENT | FIXED
+    const normalizedType = String(type).trim().toUpperCase();
     const numericAmount = Number(amount);
 
-    if (!numericAmount || numericAmount <= 0) {
-      return res.status(400).json({ error: "amount must be > 0" });
-    }
-    if (!["PERCENT", "FIXED"].includes(normalizedType)) {
-      return res.status(400).json({ error: "type must be PERCENT or FIXED" });
-    }
+    if (!numericAmount || numericAmount <= 0) return res.status(400).json({ error: "amount must be > 0" });
+    if (!["PERCENT", "FIXED"].includes(normalizedType)) return res.status(400).json({ error: "type must be PERCENT or FIXED" });
 
     const plans =
       appliesTo && Array.isArray(appliesTo.plans)
         ? appliesTo.plans.map((p) => String(p || "").trim()).filter(Boolean)
         : [];
 
-    // Derive billingTypes from selected plans based on business rules
     const billingTypes = deriveBillingTypesFromPlans(plans);
 
     const countries =
@@ -469,9 +367,7 @@ app.post("/api/admin/offers", requireAdminSecret, (req, res) => {
         : [];
 
     if (!plans.length) {
-      return res.status(400).json({
-        error: "At least one plan (appliesTo.plans) is required",
-      });
+      return res.status(400).json({ error: "At least one plan (appliesTo.plans) is required" });
     }
 
     const offers = loadOffers();
@@ -483,15 +379,8 @@ app.post("/api/admin/offers", requireAdminSecret, (req, res) => {
       amount: numericAmount,
       description: description || "",
       active: active === false ? false : true,
-      appliesTo: {
-        plans,
-        billingTypes,
-        countries,
-      },
-      usageLimit:
-        usageLimit === null || usageLimit === undefined
-          ? null
-          : Number(usageLimit),
+      appliesTo: { plans, billingTypes, countries },
+      usageLimit: usageLimit === null || usageLimit === undefined ? null : Number(usageLimit),
       used: 0,
       validity: {
         start: validity && validity.start ? validity.start : null,
@@ -499,18 +388,8 @@ app.post("/api/admin/offers", requireAdminSecret, (req, res) => {
       },
     };
 
-    if (idx >= 0) {
-      // update existing
-      offers[idx] = {
-        ...offers[idx],
-        ...offerPayload,
-      };
-      console.log("Updated offer:", normalizedCode);
-    } else {
-      // create new
-      offers.push(offerPayload);
-      console.log("Created new offer:", normalizedCode);
-    }
+    if (idx >= 0) offers[idx] = { ...offers[idx], ...offerPayload };
+    else offers.push(offerPayload);
 
     saveOffers(offers);
     return res.json({ success: true, offer: offerPayload });
@@ -520,23 +399,17 @@ app.post("/api/admin/offers", requireAdminSecret, (req, res) => {
   }
 });
 
-// PATCH /api/admin/offers/:code/enable → mark offer as active
 app.patch("/api/admin/offers/:code/enable", requireAdminSecret, (req, res) => {
   try {
     const codeParam = (req.params.code || "").toUpperCase();
-    if (!codeParam) {
-      return res.status(400).json({ error: "Offer code is required in URL" });
-    }
+    if (!codeParam) return res.status(400).json({ error: "Offer code is required in URL" });
 
     const offers = loadOffers();
     const idx = offers.findIndex((o) => o.code === codeParam);
-
-    if (idx < 0) {
-      return res.status(404).json({ error: "Offer not found" });
-    }
+    if (idx < 0) return res.status(404).json({ error: "Offer not found" });
 
     offers[idx].active = true;
-    offers[idx].enabled = true; // keep legacy field in sync
+    offers[idx].enabled = true;
 
     saveOffers(offers);
     return res.json({ success: true, offer: offers[idx] });
@@ -546,23 +419,17 @@ app.patch("/api/admin/offers/:code/enable", requireAdminSecret, (req, res) => {
   }
 });
 
-// PATCH /api/admin/offers/:code/disable → mark offer as inactive
 app.patch("/api/admin/offers/:code/disable", requireAdminSecret, (req, res) => {
   try {
     const codeParam = (req.params.code || "").toUpperCase();
-    if (!codeParam) {
-      return res.status(400).json({ error: "Offer code is required in URL" });
-    }
+    if (!codeParam) return res.status(400).json({ error: "Offer code is required in URL" });
 
     const offers = loadOffers();
     const idx = offers.findIndex((o) => o.code === codeParam);
-
-    if (idx < 0) {
-      return res.status(404).json({ error: "Offer not found" });
-    }
+    if (idx < 0) return res.status(404).json({ error: "Offer not found" });
 
     offers[idx].active = false;
-    offers[idx].enabled = false; // keep legacy field in sync
+    offers[idx].enabled = false;
 
     saveOffers(offers);
     return res.json({ success: true, offer: offers[idx] });
@@ -572,24 +439,17 @@ app.patch("/api/admin/offers/:code/disable", requireAdminSecret, (req, res) => {
   }
 });
 
-// DELETE /api/admin/offers/:code → remove an offer
 app.delete("/api/admin/offers/:code", requireAdminSecret, (req, res) => {
   try {
     const codeParam = (req.params.code || "").toUpperCase();
-    if (!codeParam) {
-      return res.status(400).json({ error: "Offer code is required in URL" });
-    }
+    if (!codeParam) return res.status(400).json({ error: "Offer code is required in URL" });
 
     const offers = loadOffers();
     const beforeCount = offers.length;
     const filtered = offers.filter((o) => o.code !== codeParam);
-
-    if (filtered.length === beforeCount) {
-      return res.status(404).json({ error: "Offer not found" });
-    }
+    if (filtered.length === beforeCount) return res.status(404).json({ error: "Offer not found" });
 
     saveOffers(filtered);
-    console.log("Deleted offer:", codeParam);
     return res.json({ success: true });
   } catch (err) {
     console.error("Error in DELETE /api/admin/offers/:code:", err);
@@ -597,36 +457,27 @@ app.delete("/api/admin/offers/:code", requireAdminSecret, (req, res) => {
   }
 });
 
-// (Optional legacy PATCH route kept for compatibility, but not used by new UI)
+// Optional legacy PATCH route kept for compatibility
 app.patch("/api/admin/offers/:code", requireAdminSecret, (req, res) => {
   try {
     const codeParam = (req.params.code || "").toUpperCase();
-    if (!codeParam) {
-      return res.status(400).json({ error: "Offer code is required in URL" });
-    }
+    if (!codeParam) return res.status(400).json({ error: "Offer code is required in URL" });
 
     const offers = loadOffers();
     const idx = offers.findIndex((o) => o.code === codeParam);
-
-    if (idx < 0) {
-      return res.status(404).json({ error: "Offer not found" });
-    }
+    if (idx < 0) return res.status(404).json({ error: "Offer not found" });
 
     const patch = req.body || {};
     const current = offers[idx];
 
     if (patch.type) {
       const t = String(patch.type).toUpperCase();
-      if (["PERCENT", "FIXED"].includes(t)) {
-        current.type = t;
-      }
+      if (["PERCENT", "FIXED"].includes(t)) current.type = t;
     }
 
     if (patch.amount !== undefined) {
       const amt = Number(patch.amount);
-      if (amt > 0) {
-        current.amount = amt;
-      }
+      if (amt > 0) current.amount = amt;
     }
 
     if (patch.active !== undefined) {
@@ -634,46 +485,29 @@ app.patch("/api/admin/offers/:code", requireAdminSecret, (req, res) => {
       current.enabled = !!patch.active;
     }
 
-    if (patch.description !== undefined) {
-      current.description = patch.description || "";
-    }
+    if (patch.description !== undefined) current.description = patch.description || "";
 
     if (patch.appliesTo) {
       const appliesTo = patch.appliesTo;
 
       if (Array.isArray(appliesTo.plans)) {
-        current.appliesTo.plans = appliesTo.plans
-          .map((p) => String(p || "").trim())
-          .filter(Boolean);
-
-        // Re-derive billingTypes whenever plans change
-        current.appliesTo.billingTypes = deriveBillingTypesFromPlans(
-          current.appliesTo.plans
-        );
+        current.appliesTo.plans = appliesTo.plans.map((p) => String(p || "").trim()).filter(Boolean);
+        current.appliesTo.billingTypes = deriveBillingTypesFromPlans(current.appliesTo.plans);
       }
 
       if (Array.isArray(appliesTo.countries)) {
-        current.appliesTo.countries = appliesTo.countries
-          .map((c) => String(c || "").trim())
-          .filter(Boolean);
+        current.appliesTo.countries = appliesTo.countries.map((c) => String(c || "").trim()).filter(Boolean);
       }
     }
 
     if (patch.usageLimit !== undefined) {
-      current.usageLimit =
-        patch.usageLimit === null ? null : Number(patch.usageLimit);
+      current.usageLimit = patch.usageLimit === null ? null : Number(patch.usageLimit);
     }
 
     if (patch.validity) {
       current.validity = {
-        start:
-          patch.validity.start !== undefined
-            ? patch.validity.start
-            : current.validity.start,
-        end:
-          patch.validity.end !== undefined
-            ? patch.validity.end
-            : current.validity.end,
+        start: patch.validity.start !== undefined ? patch.validity.start : current.validity.start,
+        end: patch.validity.end !== undefined ? patch.validity.end : current.validity.end,
       };
     }
 
@@ -688,8 +522,6 @@ app.patch("/api/admin/offers/:code", requireAdminSecret, (req, res) => {
 // ---------------------------------------------------------------------
 //  OFFER VALIDATION & APPLICATION (USED BY CHECKOUT)
 // ---------------------------------------------------------------------
-
-// Validate if a given couponCode is applicable to a planId
 function validateOfferForPlan(planId, couponCode) {
   if (!couponCode) return { valid: false };
 
@@ -702,7 +534,6 @@ function validateOfferForPlan(planId, couponCode) {
   const offer = offers.find((o) => (o.code || "").toUpperCase() === code);
   if (!offer) return { valid: false };
 
-  // Active flag (supports both new 'active' and legacy 'enabled')
   const isActive =
     offer.active !== undefined
       ? !!offer.active
@@ -712,7 +543,6 @@ function validateOfferForPlan(planId, couponCode) {
 
   if (!isActive) return { valid: false };
 
-  // Time window check (using validity.start/end or legacy startAt/endAt)
   let start = null;
   let end = null;
 
@@ -727,33 +557,17 @@ function validateOfferForPlan(planId, couponCode) {
   if (start && now < start) return { valid: false };
   if (end && now > end) return { valid: false };
 
-  // Plan match check
   let plans = [];
-  if (offer.appliesTo && Array.isArray(offer.appliesTo.plans)) {
-    plans = offer.appliesTo.plans;
-  } else if (Array.isArray(offer.applicablePlans)) {
-    plans = offer.applicablePlans;
-  }
+  if (offer.appliesTo && Array.isArray(offer.appliesTo.plans)) plans = offer.appliesTo.plans;
+  else if (Array.isArray(offer.applicablePlans)) plans = offer.applicablePlans;
 
-  if (plans.length > 0 && !plans.includes(planId)) {
-    return { valid: false };
-  }
+  if (plans.length > 0 && !plans.includes(planId)) return { valid: false };
 
-  return {
-    valid: true,
-    offer,
-  };
+  return { valid: true, offer };
 }
 
-// Apply offer to a total amount, and return discount + final
 function applyOffer(totalAmount, offer) {
-  if (!offer) {
-    return {
-      discount: 0,
-      final: totalAmount,
-      description: null,
-    };
-  }
+  if (!offer) return { discount: 0, final: totalAmount, description: null };
 
   let discount = 0;
   if (offer.type === "PERCENT") {
@@ -772,47 +586,108 @@ function applyOffer(totalAmount, offer) {
       ? `${offer.amount}% off via ${offer.code}`
       : `₹${offer.amount} off via ${offer.code}`;
 
-  return {
-    discount,
-    final,
-    description,
-  };
+  return { discount, final, description };
 }
 
 // ---------------------------------------------------------------------
 //  SIMPLE HEALTH CHECK
 // ---------------------------------------------------------------------
-
 app.get("/", (req, res) => {
   res.json({ status: "ok", message: "TGP Razorpay backend is running" });
 });
 
 // ---------------------------------------------------------------------
+//  THANK-YOU CONTRACT ENDPOINT (v1)
+//  GET /api/thank-you-contract?version=v1&order_id=...&payment_id=...&ts=...&sig=...
+// ---------------------------------------------------------------------
+app.get("/api/thank-you-contract", (req, res) => {
+  try {
+    if (!THANKYOU_SIG_SECRET) {
+      return res.status(500).json({
+        version: "v1",
+        error: { code: "MISCONFIGURED", message: "THANKYOU_SIG_SECRET not configured." },
+      });
+    }
+
+    const version = String(req.query.version || "v1");
+    const order_id = String(req.query.order_id || "");
+    const payment_id = String(req.query.payment_id || "");
+    const ts = String(req.query.ts || "");
+    const sig = String(req.query.sig || "");
+
+    if (version !== "v1" || !order_id || !payment_id || !ts || !sig) {
+      return res.status(400).json({
+        version: "v1",
+        error: { code: "MISSING_PARAMS", message: "Missing verification params." },
+      });
+    }
+
+    // Accept seconds(10) or ms(13)
+    const tsNum = Number(ts);
+    if (!Number.isFinite(tsNum)) {
+      return res.status(400).json({
+        version: "v1",
+        error: { code: "INVALID_TS", message: "Invalid timestamp." },
+      });
+    }
+    const tsMs = ts.length >= 13 ? tsNum : tsNum * 1000;
+    const ageMs = Math.abs(Date.now() - tsMs);
+    if (ageMs > 15 * 60 * 1000) {
+      return res.status(401).json({
+        version: "v1",
+        error: { code: "EXPIRED_TS", message: "Link expired." },
+      });
+    }
+
+    const expected = signThankYouV1({ order_id, payment_id, ts });
+    if (!timingSafeEqualStr(expected, sig)) {
+      return res.status(401).json({
+        version: "v1",
+        error: { code: "INVALID_SIGNATURE", message: "Verification failed." },
+      });
+    }
+
+    const contract = getThankYouContract({ order_id, payment_id });
+    if (!contract) {
+      return res.status(404).json({
+        version: "v1",
+        error: { code: "NOT_FOUND", message: "Contract not found (try again shortly)." },
+      });
+    }
+
+    return res.json(contract);
+  } catch (err) {
+    console.error("Error in GET /api/thank-you-contract:", err);
+    return res.status(500).json({
+      version: "v1",
+      error: { code: "INTERNAL_ERROR", message: "Server error." },
+    });
+  }
+});
+
+// ---------------------------------------------------------------------
 //  GENERIC CREATE RAZORPAY ORDER (ALREADY USED BY YOUR FRONTEND)
 // ---------------------------------------------------------------------
-
 app.post("/create-razorpay-order", async (req, res) => {
   try {
     const { amount, currency, receipt, notes } = req.body;
 
-    // Basic validation
     if (!amount || !currency || !receipt) {
       return res.status(400).json({
         error: "Missing required fields: amount, currency, or receipt",
       });
     }
 
-    // Ensure integer amount in paise
     const amountInt = parseInt(amount, 10);
     if (Number.isNaN(amountInt) || amountInt <= 0) {
       return res.status(400).json({ error: "Invalid amount" });
     }
 
     const options = {
-      amount: amountInt, // amount in paise
+      amount: amountInt,
       currency: currency || "INR",
       receipt: receipt,
-      notes: notes || {}, // e.g. plan_code, email, phone, gst_status, etc.
+      notes: notes || {},
     };
 
     console.log("Creating Razorpay order with options:", options);
@@ -841,7 +716,6 @@ app.post("/create-razorpay-order", async (req, res) => {
 // ---------------------------------------------------------------------
 //  PUBLIC: VALIDATE OFFER FOR ONE-TIME PLAN (for checkout UI)
 // ---------------------------------------------------------------------
-
 app.post("/api/validate-offer", (req, res) => {
   try {
     const { planId, basePrice, couponCode } = req.body;
@@ -891,7 +765,6 @@ app.post("/api/validate-offer", (req, res) => {
 // ---------------------------------------------------------------------
 //  CREATE RAZORPAY ORDER FOR ONE-TIME PAYMENT (RETIRED ENDPOINT)
 // ---------------------------------------------------------------------
-
 app.post("/create-onetime-order", (req, res) => {
   console.warn(
     "[DEPRECATED] /create-onetime-order was called. " +
@@ -909,7 +782,6 @@ app.post("/create-onetime-order", (req, res) => {
 // ---------------------------------------------------------------------
 //  ENTERPRISE: CREATE RAZORPAY ORDER (60 / 90 / 120 / consultation)
 // ---------------------------------------------------------------------
-
 app.post("/api/create-enterprise-order", async (req, res) => {
   try {
     const {
@@ -942,10 +814,7 @@ app.post("/api/create-enterprise-order", async (req, res) => {
     }
 
     if (!mobileCountryCode || !mobileNumber) {
-      console.warn("Enterprise order without primary mobile:", {
-        fullName,
-        email,
-      });
+      console.warn("Enterprise order without primary mobile:", { fullName, email });
     }
 
     if (gstStatus === "yes" && !company) {
@@ -957,21 +826,12 @@ app.post("/api/create-enterprise-order", async (req, res) => {
 
     const pkgValue = pkg === "consultation" ? "consultation" : String(pkg);
     let billingTypeValue = (billingType || "monthly").toLowerCase();
-
-    if (billingTypeValue === "subscription") {
-      billingTypeValue = "monthly";
-    }
+    if (billingTypeValue === "subscription") billingTypeValue = "monthly";
 
     const consultation = pkgValue === "consultation" || Boolean(isConsultation);
-    if (consultation) {
-      billingTypeValue = "one_time";
-    }
+    if (consultation) billingTypeValue = "one_time";
 
-    const { base, gst, total } = computeEnterprisePrice(
-      pkgValue,
-      billingTypeValue,
-      country
-    );
+    const { base, gst, total } = computeEnterprisePrice(pkgValue, billingTypeValue, country);
 
     const planId = getEnterprisePlanId(pkgValue, billingTypeValue);
 
@@ -986,11 +846,7 @@ app.post("/api/create-enterprise-order", async (req, res) => {
       finalAmount = calc.final;
       discount = calc.discount;
       offerDescription = calc.description;
-      offerMeta = {
-        code: result.offer.code,
-        type: result.offer.type,
-        amount: result.offer.amount,
-      };
+      offerMeta = { code: result.offer.code, type: result.offer.type, amount: result.offer.amount };
     }
 
     const amountInPaise = Math.round(finalAmount * 100);
@@ -1042,13 +898,7 @@ app.post("/api/create-enterprise-order", async (req, res) => {
       amountInPaise,
       currency: order.currency,
       planId,
-      pricing: {
-        base,
-        gst,
-        total,
-        discount,
-        final: finalAmount,
-      },
+      pricing: { base, gst, total, discount, final: finalAmount },
       offerApplied: !!offerMeta,
       offer: offerMeta,
       description: consultation
@@ -1068,16 +918,12 @@ app.post("/api/create-enterprise-order", async (req, res) => {
 // ---------------------------------------------------------------------
 //  STARTER/PRO: CREATE RAZORPAY ORDER (with offers.json)
 // ---------------------------------------------------------------------
-
 app.post("/api/create-starterpro-order", async (req, res) => {
   try {
     const { plan, billingType, country, coupon } = req.body || {};
 
     if (!plan) {
-      return res.status(400).json({
-        success: false,
-        error: "plan is required",
-      });
+      return res.status(400).json({ success: false, error: "plan is required" });
     }
 
     const planNormalized = plan === "pro" ? "pro" : "starter";
@@ -1085,20 +931,17 @@ app.post("/api/create-starterpro-order", async (req, res) => {
 
     let base = STARTER_PRO_PLAN_PRICES[basePlanId];
     if (!base) {
-      return res.status(400).json({
-        success: false,
-        error: "Invalid plan",
-      });
+      return res.status(400).json({ success: false, error: "Invalid plan" });
     }
 
     let bt = (billingType || "monthly").toLowerCase();
     if (bt === "subscription") bt = "monthly";
 
-    const planId = basePlanId; // monthly & yearly share the same planId for coupons
+    const planId = basePlanId;
 
     if (bt === "yearly") {
       const yearlyBeforeDiscount = base * 12;
-      base = Math.round(yearlyBeforeDiscount * 0.8); // 20% discount
+      base = Math.round(yearlyBeforeDiscount * 0.8);
     }
 
     const isIndia = (country || "").trim().toLowerCase() === "india";
@@ -1116,11 +959,7 @@ app.post("/api/create-starterpro-order", async (req, res) => {
       finalAmount = calc.final;
       discount = calc.discount;
       offerDescription = calc.description;
-      offerMeta = {
-        code: result.offer.code,
-        type: result.offer.type,
-        amount: result.offer.amount,
-      };
+      offerMeta = { code: result.offer.code, type: result.offer.type, amount: result.offer.amount };
     }
 
     const amountInPaise = Math.round(finalAmount * 100);
@@ -1159,13 +998,7 @@ app.post("/api/create-starterpro-order", async (req, res) => {
       amountInPaise,
       currency: order.currency,
       planId,
-      pricing: {
-        base,
-        gst,
-        total,
-        discount,
-        final: finalAmount,
-      },
+      pricing: { base, gst, total, discount, final: finalAmount },
       offerApplied: !!offerMeta,
       offer: offerMeta,
     });
@@ -1181,8 +1014,8 @@ app.post("/api/create-starterpro-order", async (req, res) => {
 
 // ---------------------------------------------------------------------
 //  VERIFY RAZORPAY PAYMENT (EXISTING) → n8n for subscriptions / generic
+//  UPDATED: stores thank-you contract + returns ts/sig + canonical thank-you URLs
 // ---------------------------------------------------------------------
-
 app.post("/verify-payment", async (req, res) => {
   console.log(">>> /verify-payment HIT", req.body);
   try {
@@ -1238,8 +1071,78 @@ app.post("/verify-payment", async (req, res) => {
       console.error("Error fetching order from Razorpay:", orderErr.message);
     }
 
-    const orderNotes =
-      orderDetails && orderDetails.notes ? orderDetails.notes : {};
+    const orderNotes = orderDetails && orderDetails.notes ? orderDetails.notes : {};
+
+    // -----------------------------
+    // Build canonical typed contract (v1) from order notes (source of truth)
+    // -----------------------------
+    const segment = String(orderNotes.segment || "").toLowerCase(); // "starterpro" | "enterprise" | etc.
+    const isEnterprise = segment === "enterprise";
+
+    const pricingBase = Number(orderNotes.basePrice ?? 0) || 0;
+    const pricingGst = Number(orderNotes.gstAmount ?? 0) || 0;
+    const pricingDiscount = Number(orderNotes.discount ?? 0) || 0;
+    const pricingFinal = Number(orderNotes.finalAmount ?? 0) || 0;
+
+    const countryNote = String(orderNotes.country || "").trim();
+    const isIndia = countryNote.toLowerCase() === "india";
+
+    const contract = {
+      version: "v1",
+      kind: isEnterprise ? "enterprise" : "starter_pro",
+      context: isEnterprise
+        ? {
+            package: String(orderNotes.enterprisePackage || "").toLowerCase(), // "60"|"90"|"120"|"consultation"
+            billing_type: String(orderNotes.billingType || "").toLowerCase(), // "monthly"|"yearly"|"one_time"
+            is_consultation: String(orderNotes.isConsultation || "no").toLowerCase(), // "yes"|"no"
+          }
+        : {
+            plan: String(orderNotes.plan || "").toLowerCase(), // "starter"|"pro"
+            billing_type: String(orderNotes.billingType || "").toLowerCase(), // "monthly"|"yearly"
+          },
+      pricing: {
+        base: pricingBase,
+        gst: pricingGst,
+        discount: pricingDiscount,
+        final: pricingFinal,
+        currency: "INR",
+        is_india: isIndia,
+      },
+      ids: {
+        order_id: razorpay_order_id,
+        payment_id: razorpay_payment_id,
+      },
+      display: {
+        coupon_code: String(orderNotes.couponCode || "").trim() || undefined,
+        offer_label: String(orderNotes.offerDescription || "").trim() || undefined,
+      },
+    };
+
+    // Store contract (v1)
+    storeThankYouContract({
+      order_id: razorpay_order_id,
+      payment_id: razorpay_payment_id,
+      contract,
+    });
+
+    // Sign thank-you URL params (v1)
+    const ts = Date.now().toString(); // ms
+    const sig = signThankYouV1({
+      order_id: razorpay_order_id,
+      payment_id: razorpay_payment_id,
+      ts,
+    });
+
+    const thankYouPath = isEnterprise
+      ? "/VVAS_thank-you-enterprise.html"
+      : "/VVAS_thank-you.html";
+
+    const thankYouUrl =
+      `${thankYouPath}` +
+      `?order_id=${encodeURIComponent(razorpay_order_id)}` +
+      `&payment_id=${encodeURIComponent(razorpay_payment_id)}` +
+      `&ts=${encodeURIComponent(ts)}` +
+      `&sig=${encodeURIComponent(sig)}`;
 
     const payloadForN8N = {
       source: "TGP-AI-VIDEO-RAZORPAY",
@@ -1278,9 +1181,18 @@ app.post("/verify-payment", async (req, res) => {
       }
     }
 
+    // Backward-compatible response + new typed-thankyou fields
     return res.json({
       success: true,
       message: "Payment verified successfully",
+
+      // NEW: typed thank-you navigation details
+      thank_you: {
+        kind: contract.kind,
+        ts,
+        sig,
+        url: thankYouUrl,
+      },
     });
   } catch (err) {
     console.error("Error in /verify-payment:", err);
@@ -1295,7 +1207,6 @@ app.post("/verify-payment", async (req, res) => {
 // ---------------------------------------------------------------------
 //  VERIFY ONE-TIME PAYMENT (RETIRED ENDPOINT)
 // ---------------------------------------------------------------------
-
 app.post("/verify-onetime-payment", (req, res) => {
   console.warn(
     "[DEPRECATED] /verify-onetime-payment was called. " +
@@ -1313,7 +1224,6 @@ app.post("/verify-onetime-payment", (req, res) => {
 // ---------------------------------------------------------------------
 //  START SERVER
 // ---------------------------------------------------------------------
-
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`Razorpay backend listening on port ${PORT}`);
