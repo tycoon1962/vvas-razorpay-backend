@@ -12,13 +12,14 @@ const cors = require("cors");
 const Razorpay = require("razorpay");
 const crypto = require("crypto");
 const fetch = require("node-fetch");
-const axios = require("axios");
+const axios = require("axios"); // (kept, in case used elsewhere)
 
 // ---------------------------------------------------------------------
 //  ADMIN SECRET
 // ---------------------------------------------------------------------
 const ADMIN_OFFERS_SECRET = process.env.ADMIN_OFFERS_SECRET;
 
+// NOTE: Logging secrets is risky. If you don't need this anymore, remove it.
 console.log("[ADMIN] EXPECTED SECRET VALUE =", JSON.stringify(ADMIN_OFFERS_SECRET));
 
 // Where offers will be stored (used by admin panel & public offer validation)
@@ -33,16 +34,12 @@ function requireAdminSecret(req, res, next) {
   console.log("[ADMIN] Incoming x-admin-secret =", JSON.stringify(headerSecret));
 
   if (!headerSecret) {
-    return res
-      .status(401)
-      .json({ error: "Unauthorized: missing admin secret" });
+    return res.status(401).json({ error: "Unauthorized: missing admin secret" });
   }
 
   if (headerSecret !== ADMIN_OFFERS_SECRET) {
     console.warn("[ADMIN] Invalid admin secret.");
-    return res
-      .status(401)
-      .json({ error: "Unauthorized: invalid admin secret" });
+    return res.status(401).json({ error: "Unauthorized: invalid admin secret" });
   }
 
   next();
@@ -62,6 +59,10 @@ app.use(cors());
 // ---------------------------------------------------------------------
 const THANKYOU_SIG_SECRET = process.env.THANKYOU_SIG_SECRET;
 
+// Optional: if set, backend will return absolute thank-you URLs.
+// Example: https://thegreatpassion.com
+const THANKYOU_PUBLIC_BASE_URL = process.env.THANKYOU_PUBLIC_BASE_URL || "";
+
 function base64url(buffer) {
   return buffer
     .toString("base64")
@@ -76,11 +77,7 @@ function signThankYouV1({ order_id, payment_id, ts }) {
   }
 
   const canonical = `v1|order_id=${order_id}|payment_id=${payment_id}|ts=${ts}`;
-  const mac = crypto
-    .createHmac("sha256", THANKYOU_SIG_SECRET)
-    .update(canonical)
-    .digest();
-
+  const mac = crypto.createHmac("sha256", THANKYOU_SIG_SECRET).update(canonical).digest();
   return base64url(mac);
 }
 
@@ -89,6 +86,13 @@ function timingSafeEqualStr(a, b) {
   const bb = Buffer.from(String(b || ""));
   if (aa.length !== bb.length) return false;
   return crypto.timingSafeEqual(aa, bb);
+}
+
+function joinUrl(base, p) {
+  if (!base) return p;
+  const b = String(base).replace(/\/+$/, "");
+  const pp = String(p || "").replace(/^\/+/, "");
+  return `${b}/${pp}`;
 }
 
 // ---------------------------------------------------------------------
@@ -164,12 +168,8 @@ function loadOffers() {
 
       if (!offer.appliesTo) {
         offer.appliesTo = {
-          plans: Array.isArray(offer.applicablePlans)
-            ? offer.applicablePlans
-            : [],
-          billingTypes: Array.isArray(offer.billingTypes)
-            ? offer.billingTypes
-            : [],
+          plans: Array.isArray(offer.applicablePlans) ? offer.applicablePlans : [],
+          billingTypes: Array.isArray(offer.billingTypes) ? offer.billingTypes : [],
           countries: Array.isArray(offer.countries) ? offer.countries : [],
         };
       } else {
@@ -203,11 +203,7 @@ function loadOffers() {
 
 function saveOffers(offersArray) {
   try {
-    fs.writeFileSync(
-      OFFERS_FILE,
-      JSON.stringify(offersArray, null, 2),
-      "utf8"
-    );
+    fs.writeFileSync(OFFERS_FILE, JSON.stringify(offersArray, null, 2), "utf8");
     console.log("offers.json updated. Total offers:", offersArray.length);
   } catch (err) {
     console.error("Error writing offers.json", err);
@@ -297,9 +293,7 @@ const PLANS_CONFIG = [
 
 function deriveBillingTypesFromPlans(planIds = []) {
   const uniqueIds = Array.from(new Set(planIds || []));
-  const selectedPlans = uniqueIds
-    .map((id) => PLANS_CONFIG.find((p) => p.id === id))
-    .filter(Boolean);
+  const selectedPlans = uniqueIds.map((id) => PLANS_CONFIG.find((p) => p.id === id)).filter(Boolean);
 
   if (!selectedPlans.length) return [];
 
@@ -351,8 +345,12 @@ app.post("/api/admin/offers", requireAdminSecret, (req, res) => {
     const normalizedType = String(type).trim().toUpperCase();
     const numericAmount = Number(amount);
 
-    if (!numericAmount || numericAmount <= 0) return res.status(400).json({ error: "amount must be > 0" });
-    if (!["PERCENT", "FIXED"].includes(normalizedType)) return res.status(400).json({ error: "type must be PERCENT or FIXED" });
+    if (!numericAmount || numericAmount <= 0) {
+      return res.status(400).json({ error: "amount must be > 0" });
+    }
+    if (!["PERCENT", "FIXED"].includes(normalizedType)) {
+      return res.status(400).json({ error: "type must be PERCENT or FIXED" });
+    }
 
     const plans =
       appliesTo && Array.isArray(appliesTo.plans)
@@ -535,11 +533,7 @@ function validateOfferForPlan(planId, couponCode) {
   if (!offer) return { valid: false };
 
   const isActive =
-    offer.active !== undefined
-      ? !!offer.active
-      : offer.enabled !== undefined
-      ? !!offer.enabled
-      : true;
+    offer.active !== undefined ? !!offer.active : offer.enabled !== undefined ? !!offer.enabled : true;
 
   if (!isActive) return { valid: false };
 
@@ -582,9 +576,7 @@ function applyOffer(totalAmount, offer) {
   const final = totalAmount - discount;
 
   const description =
-    offer.type === "PERCENT"
-      ? `${offer.amount}% off via ${offer.code}`
-      : `₹${offer.amount} off via ${offer.code}`;
+    offer.type === "PERCENT" ? `${offer.amount}% off via ${offer.code}` : `₹${offer.amount} off via ${offer.code}`;
 
   return { discount, final, description };
 }
@@ -851,11 +843,7 @@ app.post("/api/create-enterprise-order", async (req, res) => {
 
     const amountInPaise = Math.round(finalAmount * 100);
 
-    const receiptId =
-      "VVAS_ENT_" +
-      Date.now().toString(36) +
-      "_" +
-      Math.random().toString(36).slice(2, 7);
+    const receiptId = "VVAS_ENT_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 7);
 
     const order = await razorpay.orders.create({
       amount: amountInPaise,
@@ -963,11 +951,7 @@ app.post("/api/create-starterpro-order", async (req, res) => {
     }
 
     const amountInPaise = Math.round(finalAmount * 100);
-    const receiptId =
-      "VVAS_SP_" +
-      Date.now().toString(36) +
-      "_" +
-      Math.random().toString(36).slice(2, 7);
+    const receiptId = "VVAS_SP_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 7);
 
     const order = await razorpay.orders.create({
       amount: amountInPaise,
@@ -1105,7 +1089,7 @@ app.post("/verify-payment", async (req, res) => {
         gst: pricingGst,
         discount: pricingDiscount,
         final: pricingFinal,
-        currency: "INR",
+        currency: String(orderDetails?.currency || "INR"),
         is_india: isIndia,
       },
       ids: {
@@ -1133,16 +1117,18 @@ app.post("/verify-payment", async (req, res) => {
       ts,
     });
 
-    const thankYouPath = isEnterprise
-      ? "/VVAS_thank-you-enterprise.html"
-      : "/VVAS_thank-you.html";
+    const thankYouPath = isEnterprise ? "VVAS_thank-you-enterprise.html" : "VVAS_thank-you.html";
 
-    const thankYouUrl =
+    const thankYouRelativeUrl =
       `${thankYouPath}` +
       `?order_id=${encodeURIComponent(razorpay_order_id)}` +
       `&payment_id=${encodeURIComponent(razorpay_payment_id)}` +
       `&ts=${encodeURIComponent(ts)}` +
       `&sig=${encodeURIComponent(sig)}`;
+
+    const thankYouUrl = THANKYOU_PUBLIC_BASE_URL
+      ? joinUrl(THANKYOU_PUBLIC_BASE_URL, thankYouRelativeUrl)
+      : thankYouRelativeUrl;
 
     const payloadForN8N = {
       source: "TGP-AI-VIDEO-RAZORPAY",
