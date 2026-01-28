@@ -1267,10 +1267,15 @@ const {
       razorpay_payment_id,
       razorpay_order_id,
       razorpay_signature,
+      
+      // ✅ server-authoritative
       amount_in_paise: orderDetails?.amount ?? null,
       currency: String(orderDetails?.currency || "INR"),
+
+      // legacy/debug only (ignored for truth)
       client_amount: clientAmount,
       client_currency: clientCurrency,
+
       customer: customer || {},
       plan: plan || {},
       meta: {
