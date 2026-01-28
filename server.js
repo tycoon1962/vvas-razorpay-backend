@@ -1185,6 +1185,23 @@ const {
     } catch (orderErr) {
       console.error("Error fetching order from Razorpay:", orderErr.message);
     }
+    
+    if (!orderDetails || !orderDetails.id) {
+      console.error("ORDER_FETCH_FAILED: cannot build contract safely", {
+        razorpay_order_id,
+        razorpay_payment_id,
+      });
+
+      return res.status(502).json({
+        success: false,
+        provider: "razorpay",
+        verified: true, // signature verified, but we can't proceed safely
+        error: {
+          code: "ORDER_FETCH_FAILED",
+          message: "Payment verified but order details could not be fetched. Please retry in a moment.",
+        },
+      });
+    }
 
     const orderNotes = orderDetails && orderDetails.notes ? orderDetails.notes : {};
 
