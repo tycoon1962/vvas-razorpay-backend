@@ -1251,7 +1251,7 @@ const {
         gst: pricingGst,
         discount: pricingDiscount,
         final: pricingFinal,
-        currency: String(orderDetails?.currency || "INR"),
+        currency: String(orderDetails.currency || "INR"),
         is_india: isIndia,
       },
       ids: {
