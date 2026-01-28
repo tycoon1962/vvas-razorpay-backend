@@ -139,6 +139,27 @@ const razorpay = new Razorpay({
 const N8N_ONETIME_WEBHOOK_URL = process.env.N8N_ONETIME_WEBHOOK_URL;
 
 // ---------------------------------------------------------------------
+//  PUBLIC CONFIG (SAFE): exposes only Razorpay public key_id + env
+// ---------------------------------------------------------------------
+app.get("/api/public-config", (req, res) => {
+  const keyId = process.env.RAZORPAY_KEY_ID;
+
+  if (!keyId) {
+    return res.status(500).json({
+      success: false,
+      error: { code: "MISSING_KEY_ID", message: "RAZORPAY_KEY_ID not set" },
+    });
+  }
+
+  return res.json({
+    success: true,
+    provider: "razorpay",
+    key_id: keyId,
+    env: process.env.NODE_ENV || "unknown",
+  });
+});
+
+// ---------------------------------------------------------------------
 //  OFFERS STORAGE HELPERS
 // ---------------------------------------------------------------------
 function loadOffers() {
@@ -662,17 +683,32 @@ app.get("/api/thank-you-contract", (req, res) => {
 // ---------------------------------------------------------------------
 app.post("/create-razorpay-order", async (req, res) => {
   try {
+    const keyId = process.env.RAZORPAY_KEY_ID;
+    if (!keyId) {
+      return res.status(500).json({
+        success: false,
+        error: { code: "MISSING_KEY_ID", message: "RAZORPAY_KEY_ID not set" },
+      });
+    }
+
     const { amount, currency, receipt, notes } = req.body;
 
     if (!amount || !currency || !receipt) {
       return res.status(400).json({
-        error: "Missing required fields: amount, currency, or receipt",
+        success: false,
+        error: {
+          code: "MISSING_FIELDS",
+          message: "Missing required fields: amount, currency, or receipt",
+        },
       });
     }
 
     const amountInt = parseInt(amount, 10);
     if (Number.isNaN(amountInt) || amountInt <= 0) {
-      return res.status(400).json({ error: "Invalid amount" });
+      return res.status(400).json({
+        success: false,
+        error: { code: "INVALID_AMOUNT", message: "Invalid amount" },
+      });
     }
 
     const options = {
@@ -688,18 +724,22 @@ app.post("/create-razorpay-order", async (req, res) => {
 
     console.log("Razorpay order created:", order.id);
 
+    // Canonical response envelope (Phase 1 target)
     return res.json({
-      id: order.id,
+      success: true,
+      provider: "razorpay",
+      order_id: order.id,
       amount: order.amount,
       currency: order.currency,
+      key_id: keyId,
       receipt: order.receipt,
-      status: order.status,
-      notes: order.notes,
+      pricing: notes || {}, // keep for now; later standardize this field
     });
   } catch (err) {
     console.error("Error creating Razorpay order:", err);
     return res.status(500).json({
-      error: "Failed to create order",
+      success: false,
+      error: { code: "ORDER_CREATE_FAILED", message: "Failed to create order" },
       details: err.message,
     });
   }
@@ -776,6 +816,14 @@ app.post("/create-onetime-order", (req, res) => {
 // ---------------------------------------------------------------------
 app.post("/api/create-enterprise-order", async (req, res) => {
   try {
+    const keyId = process.env.RAZORPAY_KEY_ID;
+    if (!keyId) {
+      return res.status(500).json({
+        success: false,
+        error: { code: "MISSING_KEY_ID", message: "RAZORPAY_KEY_ID not set" },
+      });
+    }
+
     const {
       fullName,
       email,
@@ -878,10 +926,17 @@ app.post("/api/create-enterprise-order", async (req, res) => {
       },
     });
 
+    // Keep backward-compatible fields, but also add canonical ones
     return res.json({
       success: true,
-      razorpayKey: process.env.RAZORPAY_KEY_ID,
+      provider: "razorpay",
+      key_id: keyId,
+      order_id: order.id,
+
+      // legacy (keep until frontend migration complete)
+      razorpayKey: keyId,
       orderId: order.id,
+
       amount: finalAmount,
       amountInPaise,
       currency: order.currency,
@@ -908,6 +963,14 @@ app.post("/api/create-enterprise-order", async (req, res) => {
 // ---------------------------------------------------------------------
 app.post("/api/create-starterpro-order", async (req, res) => {
   try {
+    const keyId = process.env.RAZORPAY_KEY_ID;
+    if (!keyId) {
+      return res.status(500).json({
+        success: false,
+        error: { code: "MISSING_KEY_ID", message: "RAZORPAY_KEY_ID not set" },
+      });
+    }
+
     const { plan, billingType, country, coupon } = req.body || {};
 
     if (!plan) {
@@ -974,10 +1037,17 @@ app.post("/api/create-starterpro-order", async (req, res) => {
       },
     });
 
+    // Keep backward-compatible fields, but also add canonical ones
     return res.json({
       success: true,
-      razorpayKey: process.env.RAZORPAY_KEY_ID,
+      provider: "razorpay",
+      key_id: keyId,
+      order_id: order.id,
+
+      // legacy (keep until frontend migration complete)
+      razorpayKey: keyId,
       orderId: order.id,
+
       amount: finalAmount,
       amountInPaise,
       currency: order.currency,
@@ -1017,7 +1087,11 @@ app.post("/verify-payment", async (req, res) => {
 
     if (!razorpay_payment_id || !razorpay_order_id || !razorpay_signature) {
       return res.status(400).json({
-        error: "Missing Razorpay payment verification fields",
+        success: false,
+        error: {
+          code: "MISSING_FIELDS",
+          message: "Missing Razorpay payment verification fields",
+        },
       });
     }
 
@@ -1037,7 +1111,9 @@ app.post("/verify-payment", async (req, res) => {
       });
       return res.status(400).json({
         success: false,
-        error: "Invalid signature",
+        provider: "razorpay",
+        verified: false,
+        error: { code: "INVALID_SIGNATURE", message: "Invalid signature" },
       });
     }
 
@@ -1167,12 +1243,16 @@ app.post("/verify-payment", async (req, res) => {
       }
     }
 
-    // Backward-compatible response + new typed-thankyou fields
+    // Canonical + backward-compatible response
     return res.json({
       success: true,
+      provider: "razorpay",
+      verified: true,
+      order_id: razorpay_order_id,
+      payment_id: razorpay_payment_id,
       message: "Payment verified successfully",
 
-      // NEW: typed thank-you navigation details
+      // typed thank-you navigation details
       thank_you: {
         kind: contract.kind,
         ts,
@@ -1184,7 +1264,9 @@ app.post("/verify-payment", async (req, res) => {
     console.error("Error in /verify-payment:", err);
     return res.status(500).json({
       success: false,
-      error: "Internal server error",
+      provider: "razorpay",
+      verified: false,
+      error: { code: "INTERNAL_ERROR", message: "Internal server error" },
       details: err.message,
     });
   }
