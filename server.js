@@ -1188,6 +1188,37 @@ const {
 
     const orderNotes = orderDetails && orderDetails.notes ? orderDetails.notes : {};
 
+        // -----------------------------
+    // Safety: ensure notes.finalAmount matches Razorpay order.amount
+    // (prevents accidental pricing/notes mismatch)
+    // -----------------------------
+    const notesFinal = Number(orderNotes.finalAmount ?? 0) || 0;
+
+    if (orderDetails && orderDetails.amount != null && notesFinal > 0) {
+      const notesPaise = Math.round(notesFinal * 100);
+      const rpPaise = Number(orderDetails.amount);
+
+      if (Number.isFinite(rpPaise) && notesPaise !== rpPaise) {
+        console.error("AMOUNT_MISMATCH (notes vs Razorpay order)", {
+          razorpay_order_id,
+          notesFinal,
+          notesPaise,
+          razorpayOrderAmount: rpPaise,
+        });
+
+        return res.status(400).json({
+          success: false,
+          provider: "razorpay",
+          verified: true, // signature verified, but mismatch means we refuse to proceed
+          error: {
+            code: "AMOUNT_MISMATCH",
+            message: "Order amount mismatch. Please contact support with your order id.",
+          },
+        });
+      }
+    }
+
+    
     // -----------------------------
     // Build canonical typed contract (v1) from order notes (source of truth)
     // -----------------------------
