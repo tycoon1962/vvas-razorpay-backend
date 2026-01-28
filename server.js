@@ -812,6 +812,57 @@ app.post("/create-onetime-order", (req, res) => {
 });
 
 // ---------------------------------------------------------------------
+//  ENTERPRISE: QUOTE PRICE (NO ORDER) — for live UI + coupon apply
+// ---------------------------------------------------------------------
+app.post("/api/quote-enterprise-price", (req, res) => {
+  try {
+    const { package: pkg, billingType, country, coupon, isConsultation } = req.body || {};
+
+    if (!pkg) {
+      return res.status(400).json({ success: false, error: "package is required" });
+    }
+
+    const pkgValue = pkg === "consultation" ? "consultation" : String(pkg);
+
+    let billingTypeValue = (billingType || "monthly").toLowerCase();
+    if (billingTypeValue === "subscription") billingTypeValue = "monthly";
+
+    const consultation = pkgValue === "consultation" || Boolean(isConsultation);
+    if (consultation) billingTypeValue = "one_time";
+
+    const { base, gst, total } = computeEnterprisePrice(pkgValue, billingTypeValue, country);
+    const planId = getEnterprisePlanId(pkgValue, billingTypeValue);
+
+    const result = validateOfferForPlan(planId, coupon);
+
+    let finalAmount = total;
+    let discount = 0;
+    let offerMeta = null;
+
+    if (result.valid) {
+      const calc = applyOffer(total, result.offer);
+      finalAmount = calc.final;
+      discount = calc.discount;
+      offerMeta = { code: result.offer.code, type: result.offer.type, amount: result.offer.amount };
+    }
+
+    return res.json({
+      success: true,
+      provider: "razorpay",
+      planId,
+      pricing: { base, gst, total, discount, final: finalAmount },
+      offerApplied: !!offerMeta,
+      offer: offerMeta,
+      billingType: billingTypeValue,
+      package: pkgValue,
+    });
+  } catch (err) {
+    console.error("Error in /api/quote-enterprise-price:", err);
+    return res.status(500).json({ success: false, error: "Server error quoting enterprise price." });
+  }
+});
+
+// ---------------------------------------------------------------------
 //  ENTERPRISE: CREATE RAZORPAY ORDER (60 / 90 / 120 / consultation)
 // ---------------------------------------------------------------------
 app.post("/api/create-enterprise-order", async (req, res) => {
