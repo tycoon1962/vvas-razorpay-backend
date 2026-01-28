@@ -1124,17 +1124,21 @@ app.post("/api/create-starterpro-order", async (req, res) => {
 app.post("/verify-payment", async (req, res) => {
   console.log(">>> /verify-payment HIT", req.body);
   try {
-    const {
-      razorpay_payment_id,
-      razorpay_order_id,
-      razorpay_signature,
-      // pass-through data from frontend:
-      amount,
-      currency,
-      customer,
-      plan,
-      meta,
-    } = req.body || {};
+const {
+  razorpay_payment_id,
+  razorpay_order_id,
+  razorpay_signature,
+
+  // legacy pass-through (do NOT trust)
+  amount: clientAmount,
+  currency: clientCurrency,
+
+  // enrichment only
+  customer,
+  plan,
+  meta,
+} = req.body || {};
+
 
     if (!razorpay_payment_id || !razorpay_order_id || !razorpay_signature) {
       return res.status(400).json({
